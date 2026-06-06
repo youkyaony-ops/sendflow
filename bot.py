@@ -1,15 +1,11 @@
 import asyncio
 import re
-import os
 import logging
 from telethon import TelegramClient, errors
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = '8135472813:AAHiugVNCzgRuIAxG4L_3MppCW0Is01VHH8'
@@ -21,40 +17,33 @@ user_data = {}
 active_tasks = {}
 temp_sessions = {}
 
-async def safe_edit_message(query, text, keyboard=None):
-    """Безопасное редактирование сообщения"""
-    try:
-        if keyboard:
-            await query.edit_message_text(text, reply_markup=keyboard)
-        else:
-            await query.edit_message_text(text)
-    except Exception as e:
-        logger.error(f"Ошибка редактирования: {e}")
-        try:
-            await query.message.reply_text(text, reply_markup=keyboard)
-        except:
-            pass
+# ГЛАВНЫЕ КНОПКИ - ВСЕГДА В ПОЛЕ ВВОДА
+MAIN_KEYBOARD = InlineKeyboardMarkup([
+    [InlineKeyboardButton("📝 Текст рассылки", callback_data='set_text')],
+    [InlineKeyboardButton("🔗 Группы для рассылки", callback_data='set_groups')],
+    [InlineKeyboardButton("⏱ Интервал (сек)", callback_data='set_interval')],
+    [
+        InlineKeyboardButton("▶️ ЗАПУСТИТЬ", callback_data='start_broadcast'),
+        InlineKeyboardButton("⏹️ ОСТАНОВИТЬ", callback_data='stop_broadcast')
+    ],
+    [InlineKeyboardButton("📊 Статус настроек", callback_data='status')],
+    [InlineKeyboardButton("🗑 Сбросить всё", callback_data='reset_all')]
+])
+
+async def show_main_menu(chat_id, bot, text=None):
+    """Показывает главное меню с кнопками"""
+    msg = "🥕 SendFlow\n\nИспользуй кнопки ниже для управления рассылкой"
+    if text:
+        msg = text + "\n\n" + msg
+    await bot.send_message(chat_id, msg, reply_markup=MAIN_KEYBOARD)
 
 async def start(update: Update, context):
     uid = update.effective_user.id
     if uid != ADMIN_ID:
         await update.message.reply_text("❌ Нет доступа")
         return
-    
-    if uid in user_data:
-        user_data.pop(uid, None)
-    
-    keyboard = [
-        [InlineKeyboardButton("📝 Текст", callback_data='set_text')],
-        [InlineKeyboardButton("🔗 Группы", callback_data='set_groups')],
-        [InlineKeyboardButton("⏱ Интервал", callback_data='set_interval')],
-        [InlineKeyboardButton("🚀 ЗАПУСТИТЬ", callback_data='start_broadcast')],
-        [InlineKeyboardButton("🛑 ОСТАНОВИТЬ", callback_data='stop_broadcast')]
-    ]
-    await update.message.reply_text(
-        "🥕 SendFlow\n\nНастрой рассылку:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    user_data[uid] = user_data.get(uid, {})
+    await show_main_menu(uid, context.bot)
 
 async def button_callback(update: Update, context):
     query = update.callback_query
@@ -62,32 +51,46 @@ async def button_callback(update: Update, context):
     uid = query.from_user.id
     
     if uid != ADMIN_ID:
-        await safe_edit_message(query, "❌ Нет доступа")
+        await query.edit_message_text("❌ Нет доступа", reply_markup=MAIN_KEYBOARD)
         return
     
     data = query.data
     
+    # Удаляем старое сообщение с кнопками чтобы не спамить
+    try:
+        await query.message.delete()
+    except:
+        pass
+    
     if data == 'set_text':
-        user_data[uid] = user_data.get(uid, {})
         user_data[uid]['step'] = 'text'
-        await safe_edit_message(query, "📝 Введи текст рассылки (можно с эмодзи):")
+        await context.bot.send_message(
+            uid, 
+            "📝 Введи текст рассылки (можно с эмодзи):\n\nОтправь текст одним сообщением"
+        )
     
     elif data == 'set_groups':
-        user_data[uid] = user_data.get(uid, {})
         user_data[uid]['step'] = 'groups'
-        await safe_edit_message(query, "🔗 Введи ссылки на группы через запятую\nПример: @group1, @group2, https://t.me/group3")
+        await context.bot.send_message(
+            uid,
+            "🔗 Введи ссылки на группы через запятую\n"
+            "Пример: @group1, @group2, https://t.me/group3\n\n"
+            "После ввода кнопки вернутся"
+        )
     
     elif data == 'set_interval':
-        user_data[uid] = user_data.get(uid, {})
         user_data[uid]['step'] = 'interval'
-        await safe_edit_message(query, "⏱ Введи интервал в секундах (5-120):\nРекомендуем 30-60")
+        await context.bot.send_message(
+            uid,
+            "⏱ Введи интервал в секундах (5-120):\nРекомендуем 30-60"
+        )
     
     elif data == 'start_broadcast':
         if uid not in user_data:
             user_data[uid] = {}
         
         missing = []
-        if 'groups' not in user_data[uid]:
+        if 'groups' not in user_data[uid] or not user_data[uid]['groups']:
             missing.append("группы")
         if 'text' not in user_data[uid]:
             missing.append("текст")
@@ -95,36 +98,89 @@ async def button_callback(update: Update, context):
             missing.append("интервал")
         
         if missing:
-            await safe_edit_message(query, f"❌ Сначала настрой: {', '.join(missing)}")
+            await context.bot.send_message(
+                uid, 
+                f"❌ НЕ НАСТРОЕНО: {', '.join(missing)}\n\nНастрой их через кнопки ниже",
+                reply_markup=MAIN_KEYBOARD
+            )
             return
         
         if uid in active_tasks and not active_tasks[uid].done():
-            await safe_edit_message(query, "⚠️ Рассылка уже запущена")
+            await context.bot.send_message(
+                uid,
+                "⚠️ РАССЫЛКА УЖЕ ЗАПУЩЕНА!\nНажми ОСТАНОВИТЬ",
+                reply_markup=MAIN_KEYBOARD
+            )
             return
         
         user_data[uid]['step'] = 'phone'
-        await safe_edit_message(query, "🔐 Авторизация\n\nВведи номер телефона с +\nПример: +77081234567")
+        await context.bot.send_message(
+            uid,
+            "🔐 АВТОРИЗАЦИЯ TELEGRAM\n\n"
+            "Введи номер телефона с +\n"
+            "Пример: +77081234567"
+        )
     
     elif data == 'stop_broadcast':
         if uid in active_tasks and not active_tasks[uid].done():
             active_tasks[uid].cancel()
-            await safe_edit_message(query, "🛑 Рассылка остановлена")
+            await context.bot.send_message(
+                uid,
+                "🛑 РАССЫЛКА ОСТАНОВЛЕНА",
+                reply_markup=MAIN_KEYBOARD
+            )
         else:
-            await safe_edit_message(query, "❌ Нет активной рассылки")
-
-async def validate_group(client, group):
-    """Проверка доступности группы"""
-    try:
-        entity = await client.get_entity(group)
-        return True, entity
-    except errors.FloodWaitError as e:
-        logger.warning(f"Flood wait {e.seconds}")
-        return False, f"Флуд: жди {e.seconds}с"
-    except errors.RPCError as e:
-        logger.error(f"Ошибка группы {group}: {e}")
-        return False, str(e)
-    except Exception as e:
-        return False, str(e)
+            await context.bot.send_message(
+                uid,
+                "❌ НЕТ АКТИВНОЙ РАССЫЛКИ",
+                reply_markup=MAIN_KEYBOARD
+            )
+    
+    elif data == 'status':
+        status_text = "📊 **ТЕКУЩИЕ НАСТРОЙКИ**\n\n"
+        
+        if uid in user_data:
+            d = user_data[uid]
+            status_text += f"📝 Текст: {'✅ Есть' if d.get('text') else '❌ НЕТ'}\n"
+            if d.get('text'):
+                preview = d['text'][:50] + "..." if len(d['text']) > 50 else d['text']
+                status_text += f"   → {preview}\n"
+            
+            status_text += f"🔗 Группы: {len(d.get('groups', []))} шт\n" if d.get('groups') else "🔗 Группы: ❌ НЕТ\n"
+            if d.get('groups'):
+                status_text += f"   → {', '.join(d['groups'][:3])}\n"
+            
+            status_text += f"⏱ Интервал: {d.get('interval', '❌ НЕТ')} сек\n"
+        else:
+            status_text += "❌ НИЧЕГО НЕ НАСТРОЕНО\n"
+        
+        if uid in active_tasks and not active_tasks[uid].done():
+            status_text += "\n🟢 **РАССЫЛКА АКТИВНА**"
+        else:
+            status_text += "\n🔴 РАССЫЛКА НЕ АКТИВНА"
+        
+        await context.bot.send_message(uid, status_text, reply_markup=MAIN_KEYBOARD)
+    
+    elif data == 'reset_all':
+        if uid in user_data:
+            user_data.pop(uid)
+        if uid in active_tasks:
+            try:
+                active_tasks[uid].cancel()
+            except:
+                pass
+            active_tasks.pop(uid)
+        if uid in temp_sessions:
+            try:
+                await temp_sessions[uid].disconnect()
+            except:
+                pass
+            temp_sessions.pop(uid)
+        await context.bot.send_message(
+            uid,
+            "🗑 ВСЕ НАСТРОЙКИ СБРОШЕНЫ",
+            reply_markup=MAIN_KEYBOARD
+        )
 
 async def handle_message(update: Update, context):
     uid = update.effective_user.id
@@ -136,7 +192,9 @@ async def handle_message(update: Update, context):
     
     text = update.message.text.strip()
     
+    # Если нет активного шага - показываем меню
     if uid not in user_data or 'step' not in user_data[uid]:
+        await show_main_menu(uid, context.bot)
         return
     
     step = user_data[uid]['step']
@@ -148,7 +206,7 @@ async def handle_message(update: Update, context):
         user_data[uid]['text'] = text
         user_data[uid].pop('step')
         preview = text[:200] + "..." if len(text) > 200 else text
-        await update.message.reply_text(f"✅ Текст сохранён:\n{preview}")
+        await show_main_menu(uid, context.bot, f"✅ Текст сохранён:\n{preview}")
     
     elif step == 'groups':
         groups_raw = [g.strip() for g in text.split(',') if g.strip()]
@@ -165,9 +223,8 @@ async def handle_message(update: Update, context):
         
         user_data[uid]['groups'] = groups
         user_data[uid].pop('step')
-        await update.message.reply_text(f"✅ Сохранено групп: {len(groups)}\n{', '.join(groups[:5])}")
-        if len(groups) > 5:
-            await update.message.reply_text(f"и ещё {len(groups)-5}...")
+        
+        await show_main_menu(uid, context.bot, f"✅ Сохранено групп: {len(groups)}")
     
     elif step == 'interval':
         try:
@@ -175,11 +232,11 @@ async def handle_message(update: Update, context):
             if 5 <= interval <= 120:
                 user_data[uid]['interval'] = interval
                 user_data[uid].pop('step')
-                await update.message.reply_text(f"✅ Интервал {interval} сек")
+                await show_main_menu(uid, context.bot, f"✅ Интервал {interval} сек")
             else:
-                await update.message.reply_text("❌ Число от 5 до 120")
+                await update.message.reply_text("❌ Число от 5 до 120\nПопробуй снова:")
         except ValueError:
-            await update.message.reply_text("❌ Введи число")
+            await update.message.reply_text("❌ Введи число\nПопробуй снова:")
     
     elif step == 'phone':
         if not text.startswith('+') or not text[1:].isdigit():
@@ -204,31 +261,38 @@ async def handle_message(update: Update, context):
             if not await client.is_user_authorized():
                 await client.send_code_request(text)
             temp_sessions[uid] = client
-            await update.message.reply_text("📲 Код отправлен\nВведи код в формате: code12345")
+            await update.message.reply_text(
+                "📲 КОД ОТПРАВЛЕН В TELEGRAM\n\n"
+                "Введи код в формате:\ncode12345\n\n(где 12345 - код из Telegram)"
+            )
         except Exception as e:
-            logger.error(f"Ошибка отправки кода: {e}")
+            logger.error(f"Ошибка: {e}")
             await update.message.reply_text(f"❌ Ошибка: {str(e)[:100]}")
             user_data[uid].pop('step')
+            await show_main_menu(uid, context.bot, "❌ Ошибка авторизации")
     
     elif step == 'code':
         match = re.search(r'code(\d+)', text.lower())
         code = match.group(1) if match else None
         
         if not code:
-            await update.message.reply_text("❌ Формат: code12345\nГде 12345 - код из Telegram")
+            await update.message.reply_text("❌ ФОРМАТ: code12345\nПопробуй снова:")
             return
         
         user_data[uid]['code'] = code
         user_data[uid]['step'] = 'password'
-        await update.message.reply_text("🔐 Если есть двухфакторная аутентификация - введи пароль\nЕсли нет - отправь /skip")
+        await update.message.reply_text(
+            "🔐 Если есть двухфакторная аутентификация - введи пароль\n"
+            "Если нет - отправь /skip"
+        )
     
     elif step == 'password':
         password = None if text == '/skip' else text
         
         client = temp_sessions.get(uid)
         if not client:
-            await update.message.reply_text("❌ Сессия потеряна. Начни заново /start")
-            user_data.pop(uid, None)
+            await update.message.reply_text("❌ Сессия потеряна")
+            await show_main_menu(uid, context.bot)
             return
         
         groups = user_data[uid].get('groups', [])
@@ -242,35 +306,33 @@ async def handle_message(update: Update, context):
                 try:
                     await client.sign_in(password=password)
                 except errors.PasswordHashInvalidError:
-                    await update.message.reply_text("❌ Неверный пароль 2FA")
+                    await update.message.reply_text("❌ Неверный пароль")
                     return
             
             await update.message.reply_text("🔍 Проверяю доступ к группам...")
             valid_groups = []
-            invalid_groups = []
             
             for group in groups:
-                success, result = await validate_group(client, group)
-                if success:
+                try:
+                    await client.get_entity(group)
                     valid_groups.append(group)
-                else:
-                    invalid_groups.append(f"{group}: {result[:50]}")
+                except:
+                    await update.message.reply_text(f"⚠️ Группа {group} недоступна, пропускаю")
             
             if not valid_groups:
-                await update.message.reply_text("❌ Нет доступных групп для рассылки")
+                await update.message.reply_text("❌ Нет доступных групп!")
+                await show_main_menu(uid, context.bot)
                 return
-            
-            if invalid_groups:
-                await update.message.reply_text(f"⚠️ Недоступные группы:\n{chr(10).join(invalid_groups[:3])}")
             
             user_data[uid]['groups'] = valid_groups
             
             await update.message.reply_text(
-                f"✅ Авторизация успешна!\n\n"
-                f"🚀 Запускаю рассылку\n"
+                f"✅ АВТОРИЗАЦИЯ УСПЕШНА!\n\n"
+                f"🚀 ЗАПУСКАЮ РАССЫЛКУ\n"
                 f"📊 Групп: {len(valid_groups)}\n"
                 f"⏱ Интервал: {interval} сек\n\n"
-                f"Для остановки нажми кнопку 🛑 ОСТАНОВИТЬ"
+                f"Для остановки нажми кнопку ОСТАНОВИТЬ",
+                reply_markup=MAIN_KEYBOARD
             )
             
             task = asyncio.create_task(run_broadcast(uid, context.bot, client, valid_groups, msg, interval))
@@ -278,22 +340,13 @@ async def handle_message(update: Update, context):
             user_data[uid].pop('step', None)
             
         except errors.FloodWaitError as e:
-            await update.message.reply_text(f"❌ Флуд ожидание: {e.seconds} секунд. Попробуй позже")
-            user_data[uid].pop('step', None)
-        except errors.SessionPasswordNeededError:
-            if not password:
-                await update.message.reply_text("🔐 Требуется пароль 2FA. Введи пароль:")
-                return
-        except errors.PhoneCodeInvalidError:
-            await update.message.reply_text("❌ Неверный код подтверждения")
-            user_data[uid]['step'] = 'code'
+            await update.message.reply_text(f"❌ Жди {e.seconds} секунд")
+            await show_main_menu(uid, context.bot)
         except Exception as e:
-            logger.error(f"Ошибка авторизации: {e}")
             await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
-            user_data.pop(uid, None)
+            await show_main_menu(uid, context.bot)
 
 async def run_broadcast(uid, bot, client, groups, text, interval):
-    """Запуск рассылки"""
     total = len(groups)
     current = 0
     
@@ -303,61 +356,46 @@ async def run_broadcast(uid, bot, client, groups, text, interval):
                 current = idx
                 try:
                     await client.send_message(group, text)
-                    logger.info(f"[+] {uid} -> {group} ({idx}/{total})")
+                    logger.info(f"[+] {uid} -> {group}")
                     
-                    if idx % 5 == 0 or idx == total:
+                    if idx % 10 == 0 or idx == total:
                         await bot.send_message(
                             uid, 
-                            f"📨 Прогресс: {idx}/{total}\nПоследняя: {group}"
+                            f"📨 Прогресс: {idx}/{total} групп",
+                            reply_markup=MAIN_KEYBOARD
                         )
-                except errors.FloodWaitError as e:
-                    logger.warning(f"Flood wait {e.seconds}")
-                    await bot.send_message(uid, f"⚠️ Флуд: жди {e.seconds}с")
-                    await asyncio.sleep(e.seconds)
-                except errors.RPCError as e:
-                    logger.error(f"RPC ошибка {group}: {e}")
-                    await bot.send_message(uid, f"❌ Ошибка в {group}: {str(e)[:100]}")
                 except Exception as e:
-                    logger.error(f"Ошибка {group}: {e}")
-                    await bot.send_message(uid, f"❌ Ошибка: {str(e)[:100]}")
+                    await bot.send_message(uid, f"❌ Ошибка {group}: {str(e)[:50]}")
                 
                 await asyncio.sleep(interval)
             
-            await bot.send_message(uid, f"🔄 Завершён круг по {total} группам. Начинаю новый...")
+            await bot.send_message(uid, f"🔄 Круг завершён. Начинаю новый по {total} группам", reply_markup=MAIN_KEYBOARD)
     
     except asyncio.CancelledError:
-        await bot.send_message(uid, f"🛑 Рассылка остановлена. Отправлено: {current}/{total}")
-    except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
-        await bot.send_message(uid, f"❌ Критическая ошибка: {str(e)[:200]}")
+        await bot.send_message(uid, f"🛑 Рассылка остановлена. Отправлено: {current}/{total}", reply_markup=MAIN_KEYBOARD)
     finally:
         if uid in temp_sessions:
             try:
                 await temp_sessions[uid].disconnect()
             except:
                 pass
-            del temp_sessions[uid]
-        if uid in active_tasks:
-            del active_tasks[uid]
+            temp_sessions.pop(uid, None)
+        active_tasks.pop(uid, None)
+
+async def skip_command(update: Update, context):
+    uid = update.effective_user.id
+    if uid == ADMIN_ID and uid in user_data and user_data[uid].get('step') == 'password':
+        await handle_message(update, context)
 
 def main():
-    """Основная функция"""
     app = Application.builder().token(BOT_TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("skip", lambda u, c: None))  # Заглушка для /skip
+    app.add_handler(CommandHandler("skip", skip_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ SendFlow запущен")
-    print("✅ SendFlow запущен")
-    
-    try:
-        app.run_polling()
-    except KeyboardInterrupt:
-        print("\n🛑 Остановка...")
-    except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
+    print("✅ SendFlow запущен - кнопки ВСЕГДА внизу как на фото")
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
