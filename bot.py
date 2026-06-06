@@ -26,7 +26,7 @@ if not os.path.exists(SESSIONS_DIR):
     os.makedirs(SESSIONS_DIR)
 
 user_data = {}
-active_tasks = {}
+active_tasks = {}  # Ключ: f"{uid}_{bid}"
 sessions = {}
 user_states = {}
 
@@ -443,8 +443,11 @@ async def button_handler(update: Update, context):
             await send_safe(uid, context.bot, "❌ Сначала настройте ГРУППЫ для рассылки!")
             await show_broadcast_menu(uid, context.bot, bid)
             return
-        if f"{uid}_{bid}" in active_tasks:
-            await send_safe(uid, context.bot, "⚠️ Рассылка уже запущена!")
+        
+        # ПРОВЕРКА: активна ли КОНКРЕТНАЯ рассылка
+        task_key = f"{uid}_{bid}"
+        if task_key in active_tasks and not active_tasks[task_key].done():
+            await send_safe(uid, context.bot, f"⚠️ Рассылка #{bid+1} уже запущена!\nОстановите её перед повторным запуском", BACK_BTN)
             await show_broadcast_menu(uid, context.bot, bid)
             return
         
@@ -486,16 +489,18 @@ async def button_handler(update: Update, context):
             active_tasks[task_key].cancel()
             user_data[uid]['broadcasts'][bid]['active'] = False
             save_data()
-            await send_safe(uid, context.bot, "🛑 Рассылка остановлена")
+            await send_safe(uid, context.bot, f"🛑 Рассылка #{bid+1} остановлена")
         else:
-            await send_safe(uid, context.bot, "❌ Нет активной рассылки")
+            await send_safe(uid, context.bot, f"❌ Рассылка #{bid+1} не активна")
         await show_broadcast_menu(uid, context.bot, bid)
     
     elif data.startswith('bc_status_'):
         bid = int(data.split('_')[2])
         bc = user_data[uid]['broadcasts'][bid]
-        status = "🟢 РАБОТАЕТ" if bc.get('active') else "🔴 ОСТАНОВЛЕНА"
-        txt = f"📊 <b>СТАТУС РАССЫЛКИ</b>\n\n"
+        task_key = f"{uid}_{bid}"
+        is_running = task_key in active_tasks and not active_tasks[task_key].done()
+        status = "🟢 РАБОТАЕТ" if is_running else "🔴 ОСТАНОВЛЕНА"
+        txt = f"📊 <b>СТАТУС РАССЫЛКИ #{bid+1}</b>\n\n"
         txt += f"Имя: {bc.get('name', f'Рассылка {bid+1}')}\n"
         txt += f"Статус: {status}\n"
         txt += f"Отправлено: {bc.get('sent', 0)}\n"
@@ -537,7 +542,7 @@ async def button_handler(update: Update, context):
             active_tasks[task_key].cancel()
         user_data[uid]['broadcasts'].pop(bid)
         save_data()
-        await send_safe(uid, context.bot, "🗑 Рассылка удалена", MAIN_MENU)
+        await send_safe(uid, context.bot, f"🗑 Рассылка #{bid+1} удалена", MAIN_MENU)
     
     # ===== ГРУППЫ =====
     elif data == 'add_group':
@@ -628,6 +633,7 @@ async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
     random_min = bc.get('random_min', 0)
     random_max = bc.get('random_max', 0)
     
+    # Проверка групп
     valid_groups = []
     for group in groups:
         try:
@@ -644,21 +650,27 @@ async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
     save_data()
     
     if is_247:
-        await send_safe(uid, bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}", MAIN_MENU)
-        task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
-        active_tasks[f"{uid}_{bid}"] = task
-        bc['active'] = True
-        save_data()
+        await send_safe(uid, bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📢 Рассылка #{bid+1}\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}", MAIN_MENU)
+        
+        task_key = f"{uid}_{bid}"
+        if task_key not in active_tasks or active_tasks[task_key].done():
+            task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
+            active_tasks[task_key] = task
+            bc['active'] = True
+            save_data()
+            print(f"[START] Запущена рассылка #{bid+1} для пользователя {uid}")
+        else:
+            await send_safe(uid, bot, f"⚠️ Рассылка #{bid+1} уже запущена!", MAIN_MENU)
     else:
-        await send_safe(uid, bot, f"📤 <b>ОТПРАВКА РАЗОМ</b>\n\n👥 Групп: {len(valid_groups)}", MAIN_MENU)
+        await send_safe(uid, bot, f"📤 <b>ОТПРАВКА РАЗОМ</b>\n\n📢 Рассылка #{bid+1}\n👥 Групп: {len(valid_groups)}", MAIN_MENU)
         success = 0
         for group in valid_groups:
             try:
                 await client.send_message(group, msg)
                 success += 1
                 await asyncio.sleep(2)
-            except:
-                pass
+            except Exception as e:
+                await send_safe(uid, bot, f"❌ {group}: {str(e)[:50]}")
         await send_safe(uid, bot, f"✅ Отправлено: {success}/{len(valid_groups)}", MAIN_MENU)
 
 # ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
@@ -965,13 +977,16 @@ async def message_handler(update: Update, context):
         save_data()
         
         if is_247:
-            await send_safe(uid, context.bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}\n\n✅ Сессия сохранена!", MAIN_MENU)
-            task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
-            active_tasks[f"{uid}_{bid}"] = task
-            bc['active'] = True
-            save_data()
+            await send_safe(uid, context.bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📢 Рассылка #{bid+1}\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}\n\n✅ Сессия сохранена!", MAIN_MENU)
+            
+            task_key = f"{uid}_{bid}"
+            if task_key not in active_tasks or active_tasks[task_key].done():
+                task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
+                active_tasks[task_key] = task
+                bc['active'] = True
+                save_data()
         else:
-            await send_safe(uid, context.bot, f"📤 <b>ОТПРАВКА РАЗОМ</b>\n\n👥 Групп: {len(valid_groups)}", MAIN_MENU)
+            await send_safe(uid, context.bot, f"📤 <b>ОТПРАВКА РАЗОМ</b>\n\n📢 Рассылка #{bid+1}\n👥 Групп: {len(valid_groups)}", MAIN_MENU)
             success = 0
             for group in valid_groups:
                 try:
@@ -986,7 +1001,9 @@ async def message_handler(update: Update, context):
 
 # ==================== БЕСКОНЕЧНАЯ РАССЫЛКА 24/7 ====================
 async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min, random_max):
-    sent = 0
+    sent = user_data[uid]['broadcasts'][bid].get('sent', 0)
+    print(f"[START] Бесконечная рассылка #{bid+1} для {uid} запущена")
+    
     try:
         while True:
             for group in groups:
@@ -999,10 +1016,12 @@ async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min
                         user_data[uid]['total_sent'] = user_data[uid].get('total_sent', 0) + 1
                         save_data()
                     
-                    print(f"[SEND] {uid} -> {group} (#{sent})")
+                    print(f"[SEND] {uid} -> рассылка #{bid+1} -> {group} (всего: {sent})")
                 except FloodWaitError as e:
+                    print(f"[FLOOD] {uid} ждёт {e.seconds} сек")
                     await asyncio.sleep(e.seconds)
                 except Exception as e:
+                    print(f"[ERROR] {uid} рассылка #{bid+1}: {e}")
                     if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
                         user_data[uid]['broadcasts'][bid]['errors'] = user_data[uid]['broadcasts'][bid].get('errors', 0) + 1
                         user_data[uid]['total_errors'] = user_data[uid].get('total_errors', 0) + 1
@@ -1016,7 +1035,7 @@ async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min
         if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
             user_data[uid]['broadcasts'][bid]['active'] = False
             save_data()
-        print(f"[STOP] Рассылка {uid}_{bid} остановлена")
+        print(f"[STOP] Бесконечная рассылка #{bid+1} для {uid} остановлена. Отправлено: {sent}")
 
 # ==================== ЗАПУСК БОТА ====================
 def main():
@@ -1032,9 +1051,8 @@ def main():
     print("=" * 60)
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
     print("=" * 60)
-    print("📌 КНОПКИ РАБОТАЮТ")
-    print("📌 ДАННЫЕ СОХРАНЯЮТСЯ")
-    print("📌 СЕССИИ СОХРАНЯЮТСЯ")
+    print("📌 МОЖНО ЗАПУСКАТЬ НЕСКОЛЬКО РАССЫЛОК ОДНОВРЕМЕННО")
+    print("📌 КАЖДАЯ РАССЫЛКА ИМЕЕТ СВОЙ СТАТУС")
     print("=" * 60)
     
     app.run_polling()
