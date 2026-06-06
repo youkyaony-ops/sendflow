@@ -5,7 +5,7 @@ import os
 import logging
 import time
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from telethon import TelegramClient, errors
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,17 +20,121 @@ API_ID = 31245848
 API_HASH = '67336528977585e1457985dc1d0ceefb'
 DATA_FILE = 'user_data.json'
 BACKUP_FILE = 'user_data_backup.json'
+SESSIONS_DIR = 'telegram_sessions'
+
+# Создаём папку для сессий
+if not os.path.exists(SESSIONS_DIR):
+    os.makedirs(SESSIONS_DIR)
 
 user_data = {}
 active_tasks = {}
 sessions = {}
 user_states = {}
+user_sessions = {}  # Сохраняем информацию о сессиях пользователей
 
-# ==================== СОХРАНЕНИЕ ДАННЫХ (УЛУЧШЕННОЕ) ====================
+# ==================== РАБОТА С СЕССИЯМИ ====================
+def get_session_path(user_id):
+    """Получить путь к файлу сессии пользователя"""
+    return os.path.join(SESSIONS_DIR, f'session_{user_id}.session')
+
+def save_session_info(user_id, phone, is_authorized=True):
+    """Сохранить информацию о сессии пользователя"""
+    if 'sessions' not in user_data.get(user_id, {}):
+        if user_id not in user_data:
+            user_data[user_id] = {}
+        user_data[user_id]['sessions'] = {}
+    
+    user_data[user_id]['sessions'] = {
+        'phone': phone,
+        'is_authorized': is_authorized,
+        'last_used': str(datetime.now()),
+        'session_file': get_session_path(user_id)
+    }
+    save_data()
+    print(f"[SESSION] Информация о сессии сохранена для {user_id}")
+
+def get_session_info(user_id):
+    """Получить информацию о сессии пользователя"""
+    if user_id in user_data and 'sessions' in user_data[user_id]:
+        return user_data[user_id]['sessions']
+    return None
+
+def has_valid_session(user_id):
+    """Проверить, есть ли у пользователя сохранённая сессия"""
+    session_info = get_session_info(user_id)
+    if session_info and session_info.get('is_authorized'):
+        session_file = session_info.get('session_file')
+        if session_file and os.path.exists(session_file):
+            # Проверяем, не устарела ли сессия (30 дней)
+            last_used = session_info.get('last_used')
+            if last_used:
+                try:
+                    last_used_date = datetime.fromisoformat(last_used)
+                    if datetime.now() - last_used_date < timedelta(days=30):
+                        return True
+                except:
+                    pass
+    return False
+
+async def get_or_create_client(user_id, phone=None):
+    """Получить существующего клиента или создать нового"""
+    # Если клиент уже в памяти
+    if user_id in sessions:
+        try:
+            # Проверяем, жив ли клиент
+            await sessions[user_id].get_me()
+            return sessions[user_id]
+        except:
+            # Клиент мёрт, удаляем
+            try:
+                await sessions[user_id].disconnect()
+            except:
+                pass
+            del sessions[user_id]
+    
+    # Пробуем загрузить сохранённую сессию
+    session_file = get_session_path(user_id)
+    client = TelegramClient(session_file, API_ID, API_HASH)
+    
+    try:
+        await client.connect()
+        if await client.is_user_authorized():
+            # Сессия жива
+            sessions[user_id] = client
+            print(f"[SESSION] Загружена сохранённая сессия для {user_id}")
+            
+            # Обновляем информацию
+            session_info = get_session_info(user_id)
+            if session_info:
+                session_info['last_used'] = str(datetime.now())
+                session_info['is_authorized'] = True
+                save_data()
+            
+            return client
+        else:
+            # Сессия не авторизована, нужно заново
+            await client.disconnect()
+            return None
+    except Exception as e:
+        print(f"[SESSION] Ошибка загрузки сессии для {user_id}: {e}")
+        try:
+            await client.disconnect()
+        except:
+            pass
+        return None
+
+async def create_new_session(user_id, phone):
+    """Создать новую сессию"""
+    session_file = get_session_path(user_id)
+    client = TelegramClient(session_file, API_ID, API_HASH)
+    await client.connect()
+    sessions[user_id] = client
+    return client
+
+# ==================== СОХРАНЕНИЕ ДАННЫХ ====================
 def save_data():
     """Принудительное сохранение всех данных"""
     try:
-        # Сохраняем основную копию
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             clean_data = {}
             for uid, data in user_data.items():
@@ -38,13 +142,13 @@ def save_data():
                     'broadcasts': data.get('broadcasts', []),
                     'groups': data.get('groups', []),
                     'settings': data.get('settings', {'notify': True, 'autosave': True, 'def_interval': 30}),
+                    'sessions': data.get('sessions', {}),
                     'created_at': data.get('created_at', str(datetime.now())),
                     'total_sent': data.get('total_sent', 0),
                     'total_errors': data.get('total_errors', 0)
                 }
             json.dump(clean_data, f, ensure_ascii=False, indent=2)
         
-        # Создаём резервную копию
         with open(BACKUP_FILE, 'w', encoding='utf-8') as f:
             json.dump(clean_data, f, ensure_ascii=False, indent=2)
         
@@ -58,14 +162,12 @@ def load_data():
     """Загрузка всех данных"""
     global user_data
     try:
-        # Сначала пробуем загрузить основной файл
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
                 user_data = {int(k): v for k, v in loaded.items()}
                 print(f"[LOAD] Загружены данные для {len(user_data)} пользователей")
                 return True
-        # Если основного нет, пробуем бэкап
         elif os.path.exists(BACKUP_FILE):
             with open(BACKUP_FILE, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
@@ -74,7 +176,6 @@ def load_data():
                 return True
         else:
             user_data = {}
-            print("[LOAD] Новый файл данных создан")
             return True
     except Exception as e:
         print(f"[LOAD ERROR] {e}")
@@ -88,6 +189,7 @@ def save_user(uid):
             'broadcasts': [],
             'groups': [],
             'settings': {'notify': True, 'autosave': True, 'def_interval': 30},
+            'sessions': {},
             'created_at': str(datetime.now()),
             'total_sent': 0,
             'total_errors': 0
@@ -95,16 +197,6 @@ def save_user(uid):
         save_data()
         print(f"[USER] Новый пользователь {uid} создан")
     return user_data[uid]
-
-def save_broadcast(uid, bid, data):
-    """Сохранение конкретной рассылки"""
-    if uid not in user_data:
-        save_user(uid)
-    if bid >= len(user_data[uid]['broadcasts']):
-        user_data[uid]['broadcasts'].append({})
-    user_data[uid]['broadcasts'][bid] = data
-    save_data()
-    print(f"[BROADCAST] Сохранена рассылка {bid} для пользователя {uid}")
 
 # ==================== КЛАВИАТУРЫ ====================
 MAIN_MENU = InlineKeyboardMarkup([
@@ -201,7 +293,14 @@ async def start_cmd(update: Update, context):
     uid = update.effective_user.id
     load_data()
     save_user(uid)
-    await main_menu(uid, context.bot, f"👋 Привет, {update.effective_user.first_name}!")
+    
+    # Проверяем, есть ли сохранённая сессия
+    if has_valid_session(uid):
+        await send_safe(uid, context.bot, f"👋 Привет, {update.effective_user.first_name}!\n\n✅ У вас есть сохранённая сессия Telegram. Рассылки будут работать без повторной авторизации.")
+    else:
+        await send_safe(uid, context.bot, f"👋 Привет, {update.effective_user.first_name}!\n\n⚠️ Для запуска рассылок потребуется авторизация в Telegram (один раз).")
+    
+    await main_menu(uid, context.bot)
 
 async def skip_cmd(update: Update, context):
     uid = update.effective_user.id
@@ -268,7 +367,6 @@ async def button_handler(update: Update, context):
         }
         user_data[uid]['broadcasts'].append(new_broadcast)
         save_data()
-        print(f"[NEW] Создана новая рассылка #{new_id+1} для {uid}")
         await show_broadcast_menu(uid, context.bot, new_id)
     
     elif data.startswith('select_bc_'):
@@ -285,7 +383,6 @@ async def button_handler(update: Update, context):
         bid = int(data.split('_')[2])
         user_states[uid] = {'step': 'edit_groups', 'bid': bid}
         
-        # Предлагаем сохранённые группы
         saved_groups = user_data[uid].get('groups', [])
         if saved_groups:
             kb = [[InlineKeyboardButton(f"📌 {g}", callback_data=f'select_saved_group_{bid}_{g}')] for g in saved_groups[:10]]
@@ -353,8 +450,17 @@ async def button_handler(update: Update, context):
             await show_broadcast_menu(uid, context.bot, bid)
             return
         
+        # Пробуем использовать сохранённую сессию
+        existing_client = await get_or_create_client(uid)
+        if existing_client and await existing_client.is_user_authorized():
+            # Сессия уже есть, запускаем сразу
+            await send_safe(uid, context.bot, "✅ Использую сохранённую сессию Telegram")
+            await start_broadcast_with_client(uid, context.bot, bid, existing_client, is_247=True)
+            return
+        
+        # Нужна авторизация
         user_states[uid] = {'step': 'start_247', 'bid': bid}
-        await send_safe(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789", CANCEL_BTN)
+        await send_safe(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789\n\n(Сессия сохранится и не потребуется в следующий раз)", CANCEL_BTN)
     
     elif data.startswith('send_once_'):
         bid = int(data.split('_')[2])
@@ -369,8 +475,15 @@ async def button_handler(update: Update, context):
             await show_broadcast_menu(uid, context.bot, bid)
             return
         
+        # Пробуем использовать сохранённую сессию
+        existing_client = await get_or_create_client(uid)
+        if existing_client and await existing_client.is_user_authorized():
+            await send_safe(uid, context.bot, "✅ Использую сохранённую сессию Telegram")
+            await start_broadcast_with_client(uid, context.bot, bid, existing_client, is_247=False)
+            return
+        
         user_states[uid] = {'step': 'send_once', 'bid': bid}
-        await send_safe(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789", CANCEL_BTN)
+        await send_safe(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789\n\n(Сессия сохранится и не потребуется в следующий раз)", CANCEL_BTN)
     
     elif data.startswith('stop_broadcast_'):
         bid = int(data.split('_')[2])
@@ -495,7 +608,14 @@ async def button_handler(update: Update, context):
         txt += f"📢 Рассылок: {len(bc)} (🟢 {active} активных)\n"
         txt += f"📨 Отправлено: {total_sent} сообщений\n"
         txt += f"📁 Сохранено групп: {len(data_u.get('groups', []))}\n"
-        txt += f"📅 Дата регистрации: {data_u.get('created_at', 'Неизвестно')[:10]}"
+        
+        # Добавляем информацию о сессии
+        if has_valid_session(uid):
+            txt += f"\n✅ Сессия Telegram сохранена"
+        else:
+            txt += f"\n⚠️ Сессия Telegram не сохранена"
+        
+        txt += f"\n📅 Дата регистрации: {data_u.get('created_at', 'Неизвестно')[:10]}"
         await send_safe(uid, context.bot, txt, MAIN_MENU)
     
     elif data == 'settings':
@@ -534,21 +654,68 @@ async def button_handler(update: Update, context):
         await send_safe(uid, context.bot, "❓ <b>ПОМОЩЬ</b>\n\nВыберите раздел:", HELP_MENU)
     
     elif data == 'help_quick':
-        txt = "🚀 <b>БЫСТРЫЙ СТАРТ</b>\n\n1️⃣ Нажми '➕ НОВАЯ РАССЫЛКА'\n2️⃣ Настрой текст и группы\n3️⃣ Нажми '🚀 ЗАПУСТИТЬ 24/7'\n4️⃣ Авторизуйся в Telegram\n\nГотово! Рассылка работает 24/7"
+        txt = "🚀 <b>БЫСТРЫЙ СТАРТ</b>\n\n1️⃣ Нажми '➕ НОВАЯ РАССЫЛКА'\n2️⃣ Настрой текст и группы\n3️⃣ Нажми '🚀 ЗАПУСТИТЬ 24/7'\n4️⃣ Авторизуйся в Telegram (ОДИН РАЗ)\n\n✅ В следующий раз авторизация не потребуется!"
         await send_safe(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_create':
-        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>Текст:</b> любое сообщение, до 4096 символов\n<b>Группы:</b> через запятую: @group1, @group2\n<b>Интервал:</b> время между сообщениями (5-300 сек)\n<b>Рандом:</b> случайная задержка\n<b>Зациклить:</b> бесконечный повтор"
+        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>Текст:</b> любое сообщение, до 4096 символов\n<b>Группы:</b> через запятую: @group1, @group2\n<b>Интервал:</b> время между сообщениями (5-300 сек)\n<b>Рандом:</b> случайная задержка\n<b>Зациклить:</b> бесконечный повтор\n\n💾 <b>Сессия сохраняется!</b> Не нужно каждый раз вводить код."
         await send_safe(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_errors':
-        txt = "🔧 <b>ЧАСТЫЕ ОШИБКИ</b>\n\n<b>2FA:</b> введи пароль или /skip\n<b>Группа недоступна:</b> добавь бота в группу\n<b>Флуд:</b> увеличь интервал до 30+ сек\n<b>Неверный код:</b> формат code12345"
+        txt = "🔧 <b>ЧАСТЫЕ ОШИБКИ</b>\n\n<b>2FA:</b> введи пароль или /skip\n<b>Группа недоступна:</b> добавь бота в группу\n<b>Флуд:</b> увеличь интервал до 30+ сек\n<b>Неверный код:</b> формат code12345\n\n✅ Сессия сохранится после успешной авторизации!"
         await send_safe(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'cancel':
         if uid in user_states:
             del user_states[uid]
         await main_menu(uid, context.bot, "❌ Действие отменено")
+
+# ==================== ЗАПУСК РАССЫЛКИ С КЛИЕНТОМ ====================
+async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
+    """Запуск рассылки с уже существующим клиентом"""
+    if uid not in user_data:
+        save_user(uid)
+    
+    bc = user_data[uid]['broadcasts'][bid]
+    groups = bc.get('groups', [])
+    msg = bc.get('text', '')
+    interval = bc.get('interval', 30)
+    random_min = bc.get('random_min', 0)
+    random_max = bc.get('random_max', 0)
+    
+    # Проверка групп
+    valid_groups = []
+    for group in groups:
+        try:
+            await client.get_entity(group)
+            valid_groups.append(group)
+        except:
+            await send_safe(uid, bot, f"⚠️ {group} - недоступна")
+    
+    if not valid_groups:
+        await send_safe(uid, bot, "❌ Нет доступных групп!", MAIN_MENU)
+        return
+    
+    user_data[uid]['broadcasts'][bid]['groups'] = valid_groups
+    save_data()
+    
+    if is_247:
+        await send_safe(uid, bot, f"🚀 ЗАПУСК 24/7\n\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}\n\n✅ Использую сохранённую сессию", MAIN_MENU)
+        task = asyncio.create_task(run_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
+        active_tasks[f"{uid}_{bid}"] = task
+        user_data[uid]['broadcasts'][bid]['active'] = True
+        save_data()
+    else:
+        await send_safe(uid, bot, f"📤 ОТПРАВКА РАЗОМ\n\n👥 Групп: {len(valid_groups)}", MAIN_MENU)
+        success = 0
+        for group in valid_groups:
+            try:
+                await client.send_message(group, msg)
+                success += 1
+                await asyncio.sleep(2)
+            except:
+                pass
+        await send_safe(uid, bot, f"✅ Отправлено: {success}/{len(valid_groups)}", MAIN_MENU)
 
 # ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
 async def message_handler(update: Update, context):
@@ -602,7 +769,6 @@ async def message_handler(update: Update, context):
             await send_safe(uid, context.bot, "❌ Текст слишком длинный (макс 4096 символов)", CANCEL_BTN)
             return
         
-        # Сохраняем текст
         if uid not in user_data:
             save_user(uid)
         if bid >= len(user_data[uid].get('broadcasts', [])):
@@ -612,7 +778,6 @@ async def message_handler(update: Update, context):
         
         user_data[uid]['broadcasts'][bid]['text'] = text
         save_data()
-        print(f"[TEXT] Сохранён текст для рассылки {bid} пользователя {uid}")
         
         await send_safe(uid, context.bot, "✅ Текст сохранён!")
         del user_states[uid]
@@ -639,7 +804,6 @@ async def message_handler(update: Update, context):
             
             user_data[uid]['broadcasts'][bid]['groups'] = groups
             save_data()
-            print(f"[GROUPS] Сохранены группы для рассылки {bid}: {len(groups)} групп")
             await send_safe(uid, context.bot, f"✅ Сохранено {len(groups)} групп!")
         else:
             await send_safe(uid, context.bot, "❌ Не найдено групп", CANCEL_BTN)
@@ -767,21 +931,22 @@ async def message_handler(update: Update, context):
             await send_safe(uid, context.bot, "❌ Формат: +79123456789", CANCEL_BTN)
             return
         
+        # Закрываем старую сессию если есть
         if uid in sessions:
             try:
                 await sessions[uid].disconnect()
             except:
                 pass
+            del sessions[uid]
         
         user_states[uid] = {'step': 'waiting_code', 'bid': bid, 'is_247': is_247, 'phone': text}
         
-        client = TelegramClient(f'session_{uid}', API_ID, API_HASH)
-        sessions[uid] = client
+        # Создаём новую сессию
+        client = await create_new_session(uid, text)
         
         try:
-            await client.connect()
             await client.send_code_request(text)
-            await send_safe(uid, context.bot, "📲 Введите код из Telegram:\n\nФормат: code12345", CANCEL_BTN)
+            await send_safe(uid, context.bot, "📲 Введите код из Telegram:\n\nФормат: code12345\n\n✅ Сессия будет сохранена, в следующий раз код не потребуется!", CANCEL_BTN)
         except Exception as e:
             await send_safe(uid, context.bot, f"❌ Ошибка: {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
@@ -841,6 +1006,10 @@ async def message_handler(update: Update, context):
             del user_states[uid]
             return
         
+        # Сохраняем информацию о сессии
+        save_session_info(uid, phone, is_authorized=True)
+        print(f"[AUTH] Пользователь {uid} успешно авторизован, сессия сохранена")
+        
         # Проверка групп
         valid_groups = []
         for group in groups:
@@ -859,7 +1028,7 @@ async def message_handler(update: Update, context):
         save_data()
         
         if is_247:
-            await send_safe(uid, context.bot, f"🚀 ЗАПУСК 24/7\n\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}", MAIN_MENU)
+            await send_safe(uid, context.bot, f"🚀 ЗАПУСК 24/7\n\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}\n\n✅ Сессия сохранена! При следующем запуске код не потребуется.", MAIN_MENU)
             task = asyncio.create_task(run_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
             active_tasks[f"{uid}_{bid}"] = task
             user_data[uid]['broadcasts'][bid]['active'] = True
@@ -874,10 +1043,7 @@ async def message_handler(update: Update, context):
                     await asyncio.sleep(2)
                 except:
                     pass
-            await send_safe(uid, context.bot, f"✅ Отправлено: {success}/{len(valid_groups)}", MAIN_MENU)
-            await client.disconnect()
-            if uid in sessions:
-                del sessions[uid]
+            await send_safe(uid, context.bot, f"✅ Отправлено: {success}/{len(valid_groups)}\n\n✅ Сессия сохранена!", MAIN_MENU)
         
         del user_states[uid]
 
@@ -911,12 +1077,7 @@ async def run_247(uid, bid, client, groups, text, interval, random_min, random_m
         if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
             user_data[uid]['broadcasts'][bid]['active'] = False
             save_data()
-        try:
-            await client.disconnect()
-        except:
-            pass
-        if uid in sessions:
-            del sessions[uid]
+        print(f"[STOP] Рассылка {uid}_{bid} остановлена")
 
 # ==================== ЗАПУСК ====================
 def main():
@@ -929,12 +1090,14 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    print("=" * 50)
+    print("=" * 60)
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
-    print("=" * 50)
+    print("=" * 60)
     print("📌 ВСЕ ДАННЫЕ СОХРАНЯЮТСЯ")
-    print("📌 ПРИ ПЕРЕЗАПУСКЕ ВСЁ ОСТАЁТСЯ")
-    print("=" * 50)
+    print("📌 СЕССИИ TELEGRAM СОХРАНЯЮТСЯ")
+    print("📌 ПРИ ПЕРЕЗАПУСКЕ НЕ НУЖНО ЗАНОВО ВХОДИТЬ")
+    print(f"📁 СЕССИИ ХРАНЯТСЯ В ПАПКЕ: {SESSIONS_DIR}")
+    print("=" * 60)
     
     app.run_polling()
 
