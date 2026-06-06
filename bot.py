@@ -6,17 +6,16 @@ from telethon import TelegramClient, errors
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-# Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = '7983828391:AAFKhi9Gqc2Mhi26n7662hYm6aDlOv0RYgU'
+BOT_TOKEN = '8135472813:AAHiugVNCzgRuIAxG4L_3MppCW0Is01VHH8'
 ADMIN_ID = 6301912178
-API_ID = 31245848
-API_HASH = '67336528977585e1457985dc1d0ceefb'
+API_ID = 39021931
+API_HASH = '55227d81fae655ad385381539f67bf90'
 
 user_data = {}
 active_tasks = {}
@@ -42,7 +41,6 @@ async def start(update: Update, context):
         await update.message.reply_text("❌ Нет доступа")
         return
     
-    # Очистка старых данных
     if uid in user_data:
         user_data.pop(uid, None)
     
@@ -88,7 +86,6 @@ async def button_callback(update: Update, context):
         if uid not in user_data:
             user_data[uid] = {}
         
-        # Проверка настроек
         missing = []
         if 'groups' not in user_data[uid]:
             missing.append("группы")
@@ -157,7 +154,6 @@ async def handle_message(update: Update, context):
         groups_raw = [g.strip() for g in text.split(',') if g.strip()]
         groups = []
         for g in groups_raw:
-            # Очистка ссылок
             g = g.replace('https://t.me/', '@').replace('http://t.me/', '@').replace('t.me/', '@')
             if not g.startswith('@'):
                 g = '@' + g
@@ -190,7 +186,6 @@ async def handle_message(update: Update, context):
             await update.message.reply_text("❌ Номер должен начинаться с +\nПример: +77081234567")
             return
         
-        # Закрываем старую сессию если есть
         if uid in temp_sessions:
             try:
                 await temp_sessions[uid].disconnect()
@@ -241,10 +236,8 @@ async def handle_message(update: Update, context):
         interval = user_data[uid].get('interval', 30)
         
         try:
-            # Авторизация
             await client.sign_in(code=user_data[uid]['code'])
             
-            # Если требуется пароль
             if password:
                 try:
                     await client.sign_in(password=password)
@@ -252,7 +245,6 @@ async def handle_message(update: Update, context):
                     await update.message.reply_text("❌ Неверный пароль 2FA")
                     return
             
-            # Проверка групп перед запуском
             await update.message.reply_text("🔍 Проверяю доступ к группам...")
             valid_groups = []
             invalid_groups = []
@@ -268,11 +260,9 @@ async def handle_message(update: Update, context):
                 await update.message.reply_text("❌ Нет доступных групп для рассылки")
                 return
             
-            # Предупреждение о недоступных группах
             if invalid_groups:
                 await update.message.reply_text(f"⚠️ Недоступные группы:\n{chr(10).join(invalid_groups[:3])}")
             
-            # Обновляем список групп только на доступные
             user_data[uid]['groups'] = valid_groups
             
             await update.message.reply_text(
@@ -283,7 +273,6 @@ async def handle_message(update: Update, context):
                 f"Для остановки нажми кнопку 🛑 ОСТАНОВИТЬ"
             )
             
-            # Запуск рассылки
             task = asyncio.create_task(run_broadcast(uid, context.bot, client, valid_groups, msg, interval))
             active_tasks[uid] = task
             user_data[uid].pop('step', None)
@@ -316,7 +305,6 @@ async def run_broadcast(uid, bot, client, groups, text, interval):
                     await client.send_message(group, text)
                     logger.info(f"[+] {uid} -> {group} ({idx}/{total})")
                     
-                    # Отправка статуса каждые 5 сообщений
                     if idx % 5 == 0 or idx == total:
                         await bot.send_message(
                             uid, 
@@ -335,7 +323,6 @@ async def run_broadcast(uid, bot, client, groups, text, interval):
                 
                 await asyncio.sleep(interval)
             
-            # После завершения цикла - начинаем заново
             await bot.send_message(uid, f"🔄 Завершён круг по {total} группам. Начинаю новый...")
     
     except asyncio.CancelledError:
@@ -344,7 +331,6 @@ async def run_broadcast(uid, bot, client, groups, text, interval):
         logger.error(f"Критическая ошибка: {e}")
         await bot.send_message(uid, f"❌ Критическая ошибка: {str(e)[:200]}")
     finally:
-        # Очистка
         if uid in temp_sessions:
             try:
                 await temp_sessions[uid].disconnect()
@@ -358,7 +344,6 @@ def main():
     """Основная функция"""
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавление обработчиков
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("skip", lambda u, c: None))  # Заглушка для /skip
     app.add_handler(CallbackQueryHandler(button_callback))
