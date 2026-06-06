@@ -5,150 +5,56 @@ import os
 import logging
 import time
 import random
-import shutil
-import sys
-import signal
-import traceback
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Tuple, Optional, Any, Union
-from dataclasses import dataclass, field, asdict
-from collections import defaultdict
-from functools import wraps
-
 from telethon import TelegramClient, errors
-from telethon.errors import (
-    SessionPasswordNeededError,
-    PhoneCodeInvalidError,
-    FloodWaitError,
-    RPCError,
-    AuthKeyError,
-    UserDeactivatedError,
-    PhoneNumberInvalidError,
-    PhoneCodeExpiredError,
-    PasswordHashInvalidError,
-    ChatAdminRequiredError,
-    UserAlreadyParticipantError,
-    ChannelPrivateError,
-    ChannelInvalidError,
-    PeerFloodError,
-    UserPrivacyRestrictedError,
-    UsernameNotOccupiedError,
-    UsernameInvalidError,
-    ChatWriteForbiddenError,
-    MessageTooLongError,
-    MediaInvalidError,
-    FileReferenceExpiredError
-)
-from telethon.tl.custom import Button
-from telethon.tl.types import MessageEntityTextUrl, MessageEntityBold, MessageEntityItalic, MessageEntityCode, MessageEntityPre
+from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, BotCommand
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    ConversationHandler,
-    PreCheckoutQueryHandler
-)
+# ==================== НАСТРОЙКА ====================
+logging.basicConfig(level=logging.ERROR)
+logger = logging.getLogger(__name__)
 
-# ==================== КОНФИГУРАЦИЯ ====================
 BOT_TOKEN = '8135472813:AAHiugVNCzgRuIAxG4L_3MppCW0Is01VHH8'
 API_ID = 31245848
 API_HASH = '67336528977585e1457985dc1d0ceefb'
 DATA_FILE = 'user_data.json'
 BACKUP_FILE = 'user_data_backup.json'
 SESSIONS_DIR = 'telegram_sessions'
-LOG_DIR = 'logs'
-ERROR_LOG = 'error.log'
 
-# Создаём необходимые папки
-for folder in [SESSIONS_DIR, LOG_DIR]:
-    if not os.path.exists(folder):
-        os.makedirs(folder)
+if not os.path.exists(SESSIONS_DIR):
+    os.makedirs(SESSIONS_DIR)
 
-# ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
-logging.basicConfig(
-    level=logging.ERROR,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, f'bot_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'), encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# ==================== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ====================
 user_data = {}
 active_tasks = {}
 sessions = {}
 user_states = {}
-broadcast_stats = defaultdict(lambda: {'sent': 0, 'errors': 0, 'last_sent': None})
-message_queue = defaultdict(asyncio.Queue)
-rate_limits = defaultdict(list)
-executor = ThreadPoolExecutor(max_workers=4)
-
-# ==================== ДЕКОРАТОРЫ ====================
-def log_error(func):
-    @wraps(func)
-    async def wrapper(*args, **kwargs):
-        try:
-            return await func(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"Ошибка в {func.__name__}: {e}")
-            logger.error(traceback.format_exc())
-            return None
-    return wrapper
-
-def retry_on_fail(max_retries=3, delay=1):
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            for attempt in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        raise
-                    await asyncio.sleep(delay * (attempt + 1))
-            return None
-        return wrapper
-    return decorator
 
 # ==================== РАБОТА С ДАННЫМИ ====================
-@log_error
 def save_data():
-    """Сохранение всех данных с резервным копированием"""
     try:
-        clean_data = {}
-        for uid, data in user_data.items():
-            clean_data[str(uid)] = {
-                'broadcasts': data.get('broadcasts', []),
-                'groups': data.get('groups', []),
-                'settings': data.get('settings', {'notify': True, 'autosave': True, 'def_interval': 30}),
-                'sessions': data.get('sessions', {}),
-                'created_at': data.get('created_at', str(datetime.now())),
-                'total_sent': data.get('total_sent', 0),
-                'total_errors': data.get('total_errors', 0)
-            }
-        
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            clean_data = {}
+            for uid, data in user_data.items():
+                clean_data[str(uid)] = {
+                    'broadcasts': data.get('broadcasts', []),
+                    'groups': data.get('groups', []),
+                    'settings': data.get('settings', {'notify': True, 'autosave': True, 'def_interval': 30}),
+                    'sessions': data.get('sessions', {}),
+                    'created_at': data.get('created_at', str(datetime.now())),
+                    'total_sent': data.get('total_sent', 0),
+                    'total_errors': data.get('total_errors', 0)
+                }
             json.dump(clean_data, f, ensure_ascii=False, indent=2)
         
         with open(BACKUP_FILE, 'w', encoding='utf-8') as f:
             json.dump(clean_data, f, ensure_ascii=False, indent=2)
-        
         return True
     except Exception as e:
-        logger.error(f"Ошибка сохранения: {e}")
+        print(f"Save error: {e}")
         return False
 
-@log_error
 def load_data():
-    """Загрузка всех данных"""
     global user_data
     try:
         if os.path.exists(DATA_FILE):
@@ -163,13 +69,11 @@ def load_data():
             user_data = {}
         return True
     except Exception as e:
-        logger.error(f"Ошибка загрузки: {e}")
+        print(f"Load error: {e}")
         user_data = {}
         return False
 
-@log_error
 def save_user(uid):
-    """Сохранение пользователя"""
     if uid not in user_data:
         user_data[uid] = {
             'broadcasts': [],
@@ -183,38 +87,21 @@ def save_user(uid):
         save_data()
     return user_data[uid]
 
-# ==================== РАБОТА С СЕССИЯМИ ====================
 def get_session_path(user_id):
     return os.path.join(SESSIONS_DIR, f'session_{user_id}.session')
 
-@log_error
 def has_valid_session(user_id):
-    """Проверка наличия валидной сессии"""
     if user_id not in user_data:
         return False
-    
     session_info = user_data[user_id].get('sessions', {})
     if not session_info.get('is_authorized'):
         return False
-    
     session_file = get_session_path(user_id)
     if not os.path.exists(session_file):
         return False
-    
-    last_used = session_info.get('last_used')
-    if last_used:
-        try:
-            last_used_date = datetime.fromisoformat(last_used)
-            if datetime.now() - last_used_date > timedelta(days=30):
-                return False
-        except:
-            pass
-    
     return True
 
-@log_error
 async def get_client(user_id):
-    """Получение клиента с автоматическим восстановлением сессии"""
     if user_id in sessions:
         try:
             await sessions[user_id].get_me()
@@ -233,42 +120,12 @@ async def get_client(user_id):
         await client.connect()
         if await client.is_user_authorized():
             sessions[user_id] = client
-            
-            if user_id in user_data:
-                if 'sessions' not in user_data[user_id]:
-                    user_data[user_id]['sessions'] = {}
-                user_data[user_id]['sessions']['is_authorized'] = True
-                user_data[user_id]['sessions']['last_used'] = str(datetime.now())
-                save_data()
-            
             return client
         else:
             await client.disconnect()
             return None
-    except Exception as e:
-        logger.error(f"Ошибка получения клиента: {e}")
-        try:
-            await client.disconnect()
-        except:
-            pass
+    except:
         return None
-
-@log_error
-async def save_session_info(user_id, phone):
-    """Сохранение информации о сессии"""
-    if user_id not in user_data:
-        save_user(user_id)
-    
-    if 'sessions' not in user_data[user_id]:
-        user_data[user_id]['sessions'] = {}
-    
-    user_data[user_id]['sessions'] = {
-        'phone': phone,
-        'is_authorized': True,
-        'last_used': str(datetime.now()),
-        'session_file': get_session_path(user_id)
-    }
-    save_data()
 
 # ==================== КЛАВИАТУРЫ ====================
 MAIN_MENU = InlineKeyboardMarkup([
@@ -294,10 +151,7 @@ def get_broadcast_actions(bid):
 GROUPS_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("➕ ДОБАВИТЬ ГРУППУ", callback_data='add_group')],
     [InlineKeyboardButton("📋 ВСЕ ГРУППЫ", callback_data='list_groups')],
-    [InlineKeyboardButton("🔄 ПРОВЕРИТЬ ГРУППЫ", callback_data='check_groups')],
     [InlineKeyboardButton("🗑 УДАЛИТЬ ГРУППУ", callback_data='remove_group')],
-    [InlineKeyboardButton("📤 ЭКСПОРТ ГРУПП", callback_data='export_groups')],
-    [InlineKeyboardButton("📥 ИМПОРТ ГРУПП", callback_data='import_groups')],
     [InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]
 ])
 
@@ -312,43 +166,29 @@ SETTINGS_MENU = InlineKeyboardMarkup([
 HELP_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("🚀 БЫСТРЫЙ СТАРТ", callback_data='help_quick')],
     [InlineKeyboardButton("📢 КАК СОЗДАТЬ", callback_data='help_create')],
-    [InlineKeyboardButton("🔄 РЕЖИМЫ РАБОТЫ", callback_data='help_modes')],
     [InlineKeyboardButton("🔧 ОШИБКИ", callback_data='help_errors')],
-    [InlineKeyboardButton("💡 СОВЕТЫ", callback_data='help_tips')],
-    [InlineKeyboardButton("❓ FAQ", callback_data='help_faq')],
     [InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]
 ])
 
 CANCEL_BTN = InlineKeyboardMarkup([[InlineKeyboardButton("❌ ОТМЕНА", callback_data='cancel')]])
-BACK_BTN = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]])
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-@log_error
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
 async def send_safe(chat_id, bot, text, keyboard=None):
-    """Безопасная отправка сообщений"""
-    for attempt in range(3):
-        try:
-            if keyboard:
-                await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode='HTML')
-            else:
-                await bot.send_message(chat_id, text, parse_mode='HTML')
-            return True
-        except Exception as e:
-            if attempt == 2:
-                logger.error(f"Ошибка отправки: {e}")
-                return False
-            await asyncio.sleep(1)
-    return False
+    try:
+        if keyboard:
+            await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode='HTML')
+        else:
+            await bot.send_message(chat_id, text, parse_mode='HTML')
+        return True
+    except Exception as e:
+        print(f"Send error: {e}")
+        return False
 
-@log_error
 async def main_menu(chat_id, bot, text=None):
-    """Показать главное меню"""
     msg = text if text else "🥓 <b>SendFlow</b>\n\nВыберите действие:"
     await send_safe(chat_id, bot, msg, MAIN_MENU)
 
-@log_error
 async def show_broadcast_menu(uid, bot, bid):
-    """Показать меню рассылки"""
     if uid not in user_data:
         save_user(uid)
     
@@ -379,88 +219,28 @@ async def show_broadcast_menu(uid, bot, bid):
     
     await send_safe(uid, bot, txt, get_broadcast_actions(bid))
 
-@log_error
-def validate_group_link(link):
-    """Валидация ссылки на группу"""
-    link = link.strip()
-    patterns = [
-        r'^@[a-zA-Z0-9_]{5,32}$',
-        r'^https?://t\.me/[a-zA-Z0-9_]{5,32}$',
-        r'^t\.me/[a-zA-Z0-9_]{5,32}$'
-    ]
-    for pattern in patterns:
-        if re.match(pattern, link):
-            if not link.startswith('@'):
-                link = re.sub(r'https?://t\.me/', '@', link)
-                link = re.sub(r't\.me/', '@', link)
-            return True, link
-    return False, link
-
-@log_error
-async def auto_save_loop():
-    """Фоновая задача автосохранения"""
-    while True:
-        await asyncio.sleep(300)
-        save_data()
-
-@log_error
-async def check_and_run_scheduled():
-    """Проверка и запуск запланированных рассылок"""
-    while True:
-        try:
-            now = datetime.now()
-            current_time = now.strftime("%H:%M")
-            
-            for uid, data in user_data.items():
-                for bid, bc in enumerate(data.get('broadcasts', [])):
-                    schedule = bc.get('schedule')
-                    if schedule and schedule == current_time:
-                        if not bc.get('active') and f"{uid}_{bid}" not in active_tasks:
-                            client = await get_client(uid)
-                            if client:
-                                groups = bc.get('groups', [])
-                                msg = bc.get('text', '')
-                                interval = bc.get('interval', 30)
-                                random_min = bc.get('random_min', 0)
-                                random_max = bc.get('random_max', 0)
-                                
-                                if groups and msg:
-                                    task = asyncio.create_task(run_broadcast_247(uid, bid, client, groups, msg, interval, random_min, random_max))
-                                    active_tasks[f"{uid}_{bid}"] = task
-                                    bc['active'] = True
-                                    save_data()
-        except Exception as e:
-            logger.error(f"Ошибка проверки расписания: {e}")
-        await asyncio.sleep(30)
-
 # ==================== КОМАНДЫ ====================
-@log_error
 async def start_cmd(update: Update, context):
-    """Обработчик /start"""
     uid = update.effective_user.id
     load_data()
     save_user(uid)
     
-    welcome = f"👋 Привет, {update.effective_user.first_name}!\n\n"
+    welcome = f"👋 Привет, {update.effective_user.first_name}!"
     if has_valid_session(uid):
-        welcome += "✅ У вас есть сохранённая сессия Telegram\n🔄 Рассылки будут работать без повторной авторизации"
+        welcome += "\n\n✅ У вас есть сохранённая сессия Telegram"
     else:
-        welcome += "⚠️ Для запуска рассылок потребуется авторизация в Telegram (один раз)"
+        welcome += "\n\n⚠️ Для запуска рассылок потребуется авторизация"
     
     await main_menu(uid, context.bot, welcome)
 
-@log_error
 async def skip_cmd(update: Update, context):
-    """Обработчик /skip для пропуска 2FA"""
     uid = update.effective_user.id
     if user_states.get(uid, {}).get('step') == 'waiting_2fa':
         update.message.text = '/skip'
         await message_handler(update, context)
 
 # ==================== КНОПКИ ====================
-@log_error
 async def button_handler(update: Update, context):
-    """Обработчик нажатий на кнопки"""
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -476,7 +256,10 @@ async def button_handler(update: Update, context):
         await main_menu(uid, context.bot)
     
     elif data == 'my_broadcasts':
+        if uid not in user_data:
+            save_user(uid)
         broadcasts = user_data[uid].get('broadcasts', [])
+        
         if not broadcasts:
             await send_safe(uid, context.bot, "📢 У вас нет рассылок\n\n➕ Создайте новую через кнопку в меню", MAIN_MENU)
             return
@@ -486,19 +269,22 @@ async def button_handler(update: Update, context):
             name = bc.get('name', f'Рассылка {i+1}')
             status = "🟢" if bc.get('active') else "🔴"
             kb.append([InlineKeyboardButton(f"{status} {name}", callback_data=f'select_bc_{i}')])
-        kb.append([InlineKeyboardButton("➕ НОВАЯ", callback_data='new_broadcast')])
+        kb.append([InlineKeyboardButton("➕ НОВАЯ РАССЫЛКА", callback_data='new_broadcast')])
         kb.append([InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')])
         
         await context.bot.send_message(uid, "📋 <b>ВАШИ РАССЫЛКИ</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     
     elif data == 'new_broadcast':
+        if uid not in user_data:
+            save_user(uid)
         broadcasts = user_data[uid].get('broadcasts', [])
+        
         if len(broadcasts) >= 20:
             await send_safe(uid, context.bot, "❌ Максимум 20 рассылок\nУдалите ненужные", MAIN_MENU)
             return
         
         new_id = len(broadcasts)
-        user_data[uid]['broadcasts'].append({
+        new_broadcast = {
             'name': f'Рассылка {new_id+1}',
             'text': None,
             'groups': [],
@@ -511,10 +297,74 @@ async def button_handler(update: Update, context):
             'errors': 0,
             'schedule': None,
             'created_at': str(datetime.now())
-        })
+        }
+        user_data[uid]['broadcasts'].append(new_broadcast)
         save_data()
+        
         await show_broadcast_menu(uid, context.bot, new_id)
     
+    elif data == 'my_groups':
+        if uid not in user_data:
+            save_user(uid)
+        groups = user_data[uid].get('groups', [])
+        
+        if not groups:
+            await send_safe(uid, context.bot, "📁 У вас нет сохранённых групп\n\n➕ Добавьте первую через кнопку ниже", GROUPS_MENU)
+        else:
+            txt = f"📁 <b>ВАШИ ГРУППЫ ({len(groups)})</b>\n\n"
+            for i, g in enumerate(groups[:20], 1):
+                txt += f"{i}. {g}\n"
+            if len(groups) > 20:
+                txt += f"\n... и ещё {len(groups)-20} групп"
+            await send_safe(uid, context.bot, txt, GROUPS_MENU)
+    
+    elif data == 'my_stats':
+        if uid not in user_data:
+            save_user(uid)
+        data_u = user_data[uid]
+        bc = data_u.get('broadcasts', [])
+        active = sum(1 for b in bc if b.get('active'))
+        total_sent = data_u.get('total_sent', 0)
+        total_errors = data_u.get('total_errors', 0)
+        
+        txt = f"📊 <b>ВАША СТАТИСТИКА</b>\n\n"
+        txt += f"📢 Рассылок: {len(bc)} (🟢 {active} активных)\n"
+        txt += f"📨 Отправлено: {total_sent}\n"
+        txt += f"❌ Ошибок: {total_errors}\n"
+        txt += f"📈 Успешность: {((total_sent - total_errors) / max(1, total_sent) * 100):.1f}%\n"
+        txt += f"📁 Сохранено групп: {len(data_u.get('groups', []))}\n"
+        txt += f"🔐 Сессия: {'✅ Сохранена' if has_valid_session(uid) else '❌ Не сохранена'}\n"
+        txt += f"📅 Регистрация: {data_u.get('created_at', 'Неизвестно')[:10]}"
+        await send_safe(uid, context.bot, txt, MAIN_MENU)
+    
+    elif data == 'settings':
+        if uid not in user_data:
+            save_user(uid)
+        s = user_data[uid].get('settings', {})
+        txt = f"⚙️ <b>НАСТРОЙКИ</b>\n\n"
+        txt += f"🔔 Уведомления: {'✅ Вкл' if s.get('notify', True) else '❌ Выкл'}\n"
+        txt += f"💾 Автосохранение: {'✅ Вкл' if s.get('autosave', True) else '❌ Выкл'}\n"
+        txt += f"⏱ Интервал по умолч.: {s.get('def_interval', 30)} сек\n"
+        txt += f"🔐 Сессия: {'✅ Сохранена' if has_valid_session(uid) else '❌ Не сохранена'}"
+        await send_safe(uid, context.bot, txt, SETTINGS_MENU)
+    
+    elif data == 'help_menu':
+        await send_safe(uid, context.bot, "❓ <b>ПОМОЩЬ</b>\n\nВыберите раздел:", HELP_MENU)
+    
+    # ===== ПОМОЩЬ =====
+    elif data == 'help_quick':
+        txt = "🚀 <b>БЫСТРЫЙ СТАРТ</b>\n\n1️⃣ Нажми '➕ НОВАЯ РАССЫЛКА'\n2️⃣ Настрой текст и группы\n3️⃣ Нажми '🚀 ЗАПУСТИТЬ 24/7'\n4️⃣ Введи номер телефона (один раз)\n5️⃣ Введи код из Telegram\n\n✅ Готово! Рассылка работает 24/7"
+        await send_safe(uid, context.bot, txt, HELP_MENU)
+    
+    elif data == 'help_create':
+        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>Текст:</b> любое сообщение, до 4096 символов\n<b>Группы:</b> через запятую: @group1, @group2\n<b>Интервал:</b> время между сообщениями (5-300 сек)\n<b>Рандом:</b> случайная задержка\n<b>Зациклить:</b> бесконечный повтор\n\n💡 Бот должен быть участником всех групп!"
+        await send_safe(uid, context.bot, txt, HELP_MENU)
+    
+    elif data == 'help_errors':
+        txt = "🔧 <b>ЧАСТЫЕ ОШИБКИ</b>\n\n<b>2FA:</b> введи пароль или /skip\n<b>Группа недоступна:</b> добавь бота в группу\n<b>Флуд:</b> увеличь интервал до 30+ сек\n<b>Неверный код:</b> формат code12345"
+        await send_safe(uid, context.bot, txt, HELP_MENU)
+    
+    # ===== ВЫБОР РАССЫЛКИ =====
     elif data.startswith('select_bc_'):
         bid = int(data.split('_')[2])
         await show_broadcast_menu(uid, context.bot, bid)
@@ -532,7 +382,7 @@ async def button_handler(update: Update, context):
         saved_groups = user_data[uid].get('groups', [])
         if saved_groups:
             kb = []
-            for g in saved_groups[:15]:
+            for g in saved_groups[:10]:
                 kb.append([InlineKeyboardButton(f"📌 {g}", callback_data=f'select_saved_group_{bid}_{g}')])
             kb.append([InlineKeyboardButton("✏️ ВВЕСТИ ВРУЧНУЮ", callback_data=f'manual_groups_{bid}')])
             kb.append([InlineKeyboardButton("❌ ОТМЕНА", callback_data='cancel')])
@@ -567,7 +417,7 @@ async def button_handler(update: Update, context):
     elif data.startswith('edit_random_'):
         bid = int(data.split('_')[2])
         user_states[uid] = {'step': 'edit_random', 'bid': bid}
-        await send_safe(uid, context.bot, "🎲 Введите диапазон случайной задержки:\n\nФормат: мин-макс\nПример: 10-30\n0 - отключить", CANCEL_BTN)
+        await send_safe(uid, context.bot, "🎲 Введите диапазон (мин-макс):\nПример: 10-30\n0 - отключить", CANCEL_BTN)
     
     elif data.startswith('toggle_loop_'):
         bid = int(data.split('_')[2])
@@ -579,22 +429,22 @@ async def button_handler(update: Update, context):
     elif data.startswith('edit_schedule_'):
         bid = int(data.split('_')[2])
         user_states[uid] = {'step': 'edit_schedule', 'bid': bid}
-        await send_safe(uid, context.bot, "📅 Введите время для автоматического запуска:\n\nФормат: ЧЧ:ММ\nПример: 14:30\noff - отключить", CANCEL_BTN)
+        await send_safe(uid, context.bot, "📅 Введите время (ЧЧ:ММ):\nПример: 14:30\noff - отключить", CANCEL_BTN)
     
     elif data.startswith('start_247_'):
         bid = int(data.split('_')[2])
         bc = user_data[uid]['broadcasts'][bid]
         
         if not bc.get('text'):
-            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ рассылки!", BACK_BTN)
+            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ рассылки!")
             await show_broadcast_menu(uid, context.bot, bid)
             return
         if not bc.get('groups'):
-            await send_safe(uid, context.bot, "❌ Сначала настройте ГРУППЫ для рассылки!", BACK_BTN)
+            await send_safe(uid, context.bot, "❌ Сначала настройте ГРУППЫ для рассылки!")
             await show_broadcast_menu(uid, context.bot, bid)
             return
         if f"{uid}_{bid}" in active_tasks:
-            await send_safe(uid, context.bot, "⚠️ Рассылка уже запущена!", BACK_BTN)
+            await send_safe(uid, context.bot, "⚠️ Рассылка уже запущена!")
             await show_broadcast_menu(uid, context.bot, bid)
             return
         
@@ -605,18 +455,18 @@ async def button_handler(update: Update, context):
             return
         
         user_states[uid] = {'step': 'start_247', 'bid': bid}
-        await send_safe(uid, context.bot, "🔐 Введите номер телефона Telegram:\n+79123456789\n\n(Сессия сохранится на 30 дней)", CANCEL_BTN)
+        await send_safe(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789\n\n(Сессия сохранится на 30 дней)", CANCEL_BTN)
     
     elif data.startswith('send_once_'):
         bid = int(data.split('_')[2])
         bc = user_data[uid]['broadcasts'][bid]
         
         if not bc.get('text'):
-            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ рассылки!", BACK_BTN)
+            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ рассылки!")
             await show_broadcast_menu(uid, context.bot, bid)
             return
         if not bc.get('groups'):
-            await send_safe(uid, context.bot, "❌ Сначала настройте ГРУППЫ для рассылки!", BACK_BTN)
+            await send_safe(uid, context.bot, "❌ Сначала настройте ГРУППЫ для рассылки!")
             await show_broadcast_menu(uid, context.bot, bid)
             return
         
@@ -627,7 +477,7 @@ async def button_handler(update: Update, context):
             return
         
         user_states[uid] = {'step': 'send_once', 'bid': bid}
-        await send_safe(uid, context.bot, "🔐 Введите номер телефона Telegram:\n+79123456789\n\n(Сессия сохранится на 30 дней)", CANCEL_BTN)
+        await send_safe(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789\n\n(Сессия сохранится на 30 дней)", CANCEL_BTN)
     
     elif data.startswith('stop_broadcast_'):
         bid = int(data.split('_')[2])
@@ -690,16 +540,6 @@ async def button_handler(update: Update, context):
         await send_safe(uid, context.bot, "🗑 Рассылка удалена", MAIN_MENU)
     
     # ===== ГРУППЫ =====
-    elif data == 'my_groups':
-        groups = user_data[uid].get('groups', [])
-        if not groups:
-            await send_safe(uid, context.bot, "📁 У вас нет сохранённых групп\n\n➕ Добавьте первую через кнопку ниже", GROUPS_MENU)
-        else:
-            txt = f"📁 <b>ВАШИ ГРУППЫ ({len(groups)})</b>\n\n" + "\n".join([f"• {g}" for g in groups[:20]])
-            if len(groups) > 20:
-                txt += f"\n\n... и ещё {len(groups)-20} групп"
-            await send_safe(uid, context.bot, txt, GROUPS_MENU)
-    
     elif data == 'add_group':
         user_states[uid] = {'step': 'add_group'}
         await send_safe(uid, context.bot, "➕ Введите ссылку на группу:\n\nПример: @group_name или https://t.me/group", CANCEL_BTN)
@@ -712,34 +552,6 @@ async def button_handler(update: Update, context):
             txt = "📋 <b>ВСЕ ГРУППЫ</b>\n\n" + "\n".join([f"{i+1}. {g}" for i, g in enumerate(groups)])
             await send_safe(uid, context.bot, txt, GROUPS_MENU)
     
-    elif data == 'check_groups':
-        groups = user_data[uid].get('groups', [])
-        if not groups:
-            await send_safe(uid, context.bot, "📁 Нет групп для проверки", GROUPS_MENU)
-            return
-        
-        await send_safe(uid, context.bot, f"🔄 Проверяю {len(groups)} групп...")
-        
-        client = await get_client(uid)
-        if not client:
-            await send_safe(uid, context.bot, "❌ Нет активной сессии Telegram\nСначала запустите любую рассылку для авторизации", GROUPS_MENU)
-            return
-        
-        valid = []
-        invalid = []
-        
-        for group in groups:
-            try:
-                await client.get_entity(group)
-                valid.append(group)
-            except:
-                invalid.append(group)
-        
-        txt = f"✅ Доступно: {len(valid)}\n❌ Недоступно: {len(invalid)}"
-        if invalid:
-            txt += f"\n\nНедоступные группы:\n" + "\n".join(invalid[:10])
-        await send_safe(uid, context.bot, txt, GROUPS_MENU)
-    
     elif data == 'remove_group':
         groups = user_data[uid].get('groups', [])
         if not groups:
@@ -747,7 +559,7 @@ async def button_handler(update: Update, context):
             return
         
         kb = []
-        for i, g in enumerate(groups[:25]):
+        for i, g in enumerate(groups[:20]):
             kb.append([InlineKeyboardButton(f"❌ {g}", callback_data=f'del_group_{i}')])
         kb.append([InlineKeyboardButton("🔙 НАЗАД", callback_data='my_groups')])
         
@@ -762,53 +574,7 @@ async def button_handler(update: Update, context):
             save_data()
             await send_safe(uid, context.bot, f"✅ Удалена группа: {removed}", GROUPS_MENU)
     
-    elif data == 'export_groups':
-        groups = user_data[uid].get('groups', [])
-        if not groups:
-            await send_safe(uid, context.bot, "📁 Нет групп для экспорта", GROUPS_MENU)
-            return
-        
-        export_file = f"groups_{uid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        with open(export_file, 'w', encoding='utf-8') as f:
-            f.write("\n".join(groups))
-        
-        with open(export_file, 'rb') as f:
-            await context.bot.send_document(uid, InputFile(f), caption="📁 Экспорт групп")
-        
-        os.remove(export_file)
-    
-    elif data == 'import_groups':
-        user_states[uid] = {'step': 'import_groups'}
-        await send_safe(uid, context.bot, "📥 Отправьте текстовый файл со списком групп (по одной на строку)", CANCEL_BTN)
-    
-    # ===== СТАТИСТИКА =====
-    elif data == 'my_stats':
-        data_u = user_data[uid]
-        bc = data_u.get('broadcasts', [])
-        active = sum(1 for b in bc if b.get('active'))
-        total_sent = data_u.get('total_sent', 0)
-        total_errors = data_u.get('total_errors', 0)
-        
-        txt = f"📊 <b>ВАША СТАТИСТИКА</b>\n\n"
-        txt += f"📢 Рассылок: {len(bc)} (🟢 {active} активных)\n"
-        txt += f"📨 Отправлено: {total_sent}\n"
-        txt += f"❌ Ошибок: {total_errors}\n"
-        txt += f"📈 Успешность: {((total_sent - total_errors) / max(1, total_sent) * 100):.1f}%\n"
-        txt += f"📁 Сохранено групп: {len(data_u.get('groups', []))}\n"
-        txt += f"🔐 Сессия: {'✅ Сохранена' if has_valid_session(uid) else '❌ Не сохранена'}\n"
-        txt += f"📅 Регистрация: {data_u.get('created_at', 'Неизвестно')[:10]}"
-        await send_safe(uid, context.bot, txt, MAIN_MENU)
-    
     # ===== НАСТРОЙКИ =====
-    elif data == 'settings':
-        s = user_data[uid].get('settings', {})
-        txt = f"⚙️ <b>НАСТРОЙКИ</b>\n\n"
-        txt += f"🔔 Уведомления: {'✅ Вкл' if s.get('notify', True) else '❌ Выкл'}\n"
-        txt += f"💾 Автосохранение: {'✅ Вкл' if s.get('autosave', True) else '❌ Выкл'}\n"
-        txt += f"⏱ Интервал по умолч.: {s.get('def_interval', 30)} сек\n"
-        txt += f"🔐 Сессия: {'✅ Сохранена' if has_valid_session(uid) else '❌ Не сохранена'}"
-        await send_safe(uid, context.bot, txt, SETTINGS_MENU)
-    
     elif data == 'toggle_notify':
         s = user_data[uid].get('settings', {})
         s['notify'] = not s.get('notify', True)
@@ -845,43 +611,13 @@ async def button_handler(update: Update, context):
         
         await send_safe(uid, context.bot, "🗑 Сессия очищена\nПри следующем запуске потребуется авторизация", SETTINGS_MENU)
     
-    # ===== ПОМОЩЬ =====
-    elif data == 'help_menu':
-        await send_safe(uid, context.bot, "❓ <b>ПОМОЩЬ</b>\n\nВыберите раздел:", HELP_MENU)
-    
-    elif data == 'help_quick':
-        txt = "🚀 <b>БЫСТРЫЙ СТАРТ</b>\n\n1️⃣ Нажми '➕ НОВАЯ РАССЫЛКА'\n2️⃣ Настрой текст и группы\n3️⃣ Нажми '🚀 ЗАПУСТИТЬ 24/7'\n4️⃣ Введи номер телефона (один раз)\n5️⃣ Введи код из Telegram\n\n✅ Готово! Рассылка работает 24/7\n✅ Сессия сохранится на 30 дней"
-        await send_safe(uid, context.bot, txt, HELP_MENU)
-    
-    elif data == 'help_create':
-        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>Текст:</b> любое сообщение, до 4096 символов\n<b>Группы:</b> через запятую: @group1, @group2\n<b>Интервал:</b> время между сообщениями (5-300 сек)\n<b>Рандом:</b> случайная задержка между мин и макс\n<b>Зациклить:</b> бесконечный повтор по кругу\n<b>Расписание:</b> автоматический запуск в указанное время\n\n💡 Бот должен быть участником всех групп!"
-        await send_safe(uid, context.bot, txt, HELP_MENU)
-    
-    elif data == 'help_modes':
-        txt = "🔄 <b>РЕЖИМЫ РАБОТЫ</b>\n\n<b>🚀 24/7 режим:</b>\nСообщение отправляется по кругу бесконечно\nГруппа1 → Группа2 → ... → ГруппаN → Группа1\n\n<b>▶️ Разовый режим:</b>\nОдно сообщение во все группы, после чего остановка\n\n<b>📅 По расписанию:</b>\nАвтоматический запуск в указанное время\n\n<b>🎲 С рандомом:</b>\nСлучайная задержка между сообщениями\n(имитирует естественное поведение)"
-        await send_safe(uid, context.bot, txt, HELP_MENU)
-    
-    elif data == 'help_errors':
-        txt = "🔧 <b>ЧАСТЫЕ ОШИБКИ И РЕШЕНИЯ</b>\n\n<b>❌ 2FA (двухфакторная аутентификация)</b>\n→ Введи пароль от Telegram. Если нет 2FA, нажми /skip\n\n<b>❌ Группа недоступна</b>\n→ Добавь бота в группу и дай права на отправку\n\n<b>❌ Флуд-контроль (FloodWait)</b>\n→ Увеличь интервал до 30+ секунд\n\n<b>❌ Неверный код</b>\n→ Используй формат: code12345 (только цифры)\n\n<b>❌ Сессия устарела</b>\n→ Нажми 'ОЧИСТИТЬ СЕССИЮ' в настройках и авторизуйся заново"
-        await send_safe(uid, context.bot, txt, HELP_MENU)
-    
-    elif data == 'help_tips':
-        txt = "💡 <b>ПОЛЕЗНЫЕ СОВЕТЫ</b>\n\n• Сохраняйте группы в разделе 'МОИ ГРУППЫ' для быстрого доступа\n• Используйте функцию 'КЛОНИРОВАТЬ' для создания похожих рассылок\n• Устанавливайте интервал 30-60 секунд для безопасности\n• Проверяйте доступность групп перед запуском\n• Регулярно делайте бэкап настроек\n• Сессия сохраняется на 30 дней, не нужно каждый раз входить"
-        await send_safe(uid, context.bot, txt, HELP_MENU)
-    
-    elif data == 'help_faq':
-        txt = "❓ <b>ЧАСТО ЗАДАВАЕМЫЕ ВОПРОСЫ</b>\n\n<b>Вопрос:</b> Нужно ли каждый раз вводить код?\n<b>Ответ:</b> Нет, сессия сохраняется на 30 дней\n\n<b>Вопрос:</b> Сколько групп можно добавить?\n<b>Ответ:</b> До 50 групп на одну рассылку\n\n<b>Вопрос:</b> Можно ли отправлять медиафайлы?\n<b>Ответ:</b> Да, отправьте фото/видео/документ в режиме редактирования\n\n<b>Вопрос:</b> Что делать, если бот не отвечает?\n<b>Ответ:</b> Напиши /start для перезапуска или перезапусти бота"
-        await send_safe(uid, context.bot, txt, HELP_MENU)
-    
     elif data == 'cancel':
         if uid in user_states:
             del user_states[uid]
         await main_menu(uid, context.bot, "❌ Действие отменено")
 
 # ==================== ЗАПУСК РАССЫЛКИ С КЛИЕНТОМ ====================
-@log_error
 async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
-    """Запуск рассылки с существующим клиентом"""
     if uid not in user_data:
         save_user(uid)
     
@@ -892,24 +628,23 @@ async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
     random_min = bc.get('random_min', 0)
     random_max = bc.get('random_max', 0)
     
-    # Проверка групп
     valid_groups = []
     for group in groups:
         try:
             await client.get_entity(group)
             valid_groups.append(group)
-        except Exception as e:
+        except:
             await send_safe(uid, bot, f"⚠️ {group} - недоступна")
     
     if not valid_groups:
-        await send_safe(uid, bot, "❌ Нет доступных групп!\nПроверьте что бот добавлен в группы", MAIN_MENU)
+        await send_safe(uid, bot, "❌ Нет доступных групп!", MAIN_MENU)
         return
     
     bc['groups'] = valid_groups
     save_data()
     
     if is_247:
-        await send_safe(uid, bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}\n\n✅ Сессия сохранена!", MAIN_MENU)
+        await send_safe(uid, bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}", MAIN_MENU)
         task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
         active_tasks[f"{uid}_{bid}"] = task
         bc['active'] = True
@@ -922,16 +657,14 @@ async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
                 await client.send_message(group, msg)
                 success += 1
                 await asyncio.sleep(2)
-            except Exception as e:
-                await send_safe(uid, bot, f"❌ {group}: {str(e)[:50]}")
+            except:
+                pass
         await send_safe(uid, bot, f"✅ Отправлено: {success}/{len(valid_groups)}", MAIN_MENU)
 
 # ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
-@log_error
 async def message_handler(update: Update, context):
-    """Обработка текстовых сообщений"""
     uid = update.effective_user.id
-    text = update.message.text.strip() if update.message.text else None
+    text = update.message.text.strip()
     
     save_user(uid)
     
@@ -960,41 +693,17 @@ async def message_handler(update: Update, context):
     
     # ДОБАВЛЕНИЕ ГРУППЫ
     elif step == 'add_group':
-        valid, group = validate_group_link(text)
-        if valid:
-            groups = user_data[uid].get('groups', [])
-            if group not in groups:
-                groups.append(group)
-                user_data[uid]['groups'] = groups
-                save_data()
-                await send_safe(uid, context.bot, f"✅ Группа {group} добавлена!", GROUPS_MENU)
-            else:
-                await send_safe(uid, context.bot, f"⚠️ Группа {group} уже есть", GROUPS_MENU)
-        else:
-            await send_safe(uid, context.bot, "❌ Неверный формат группы\nПример: @group_name", CANCEL_BTN)
-            return
-        del user_states[uid]
-    
-    # ИМПОРТ ГРУПП
-    elif step == 'import_groups':
-        if update.message.document:
-            file = await update.message.document.get_file()
-            content = await file.download_as_bytearray()
-            new_groups = content.decode('utf-8').strip().split('\n')
-            groups = user_data[uid].get('groups', [])
-            added = 0
-            for g in new_groups:
-                g = g.strip()
-                if g and g not in groups:
-                    valid, group = validate_group_link(g)
-                    if valid:
-                        groups.append(group)
-                        added += 1
+        group = text.replace('https://t.me/', '@').replace('http://t.me/', '@').replace('t.me/', '@')
+        if not group.startswith('@'):
+            group = '@' + group
+        groups = user_data[uid].get('groups', [])
+        if group not in groups:
+            groups.append(group)
             user_data[uid]['groups'] = groups
             save_data()
-            await send_safe(uid, context.bot, f"✅ Импортировано {added} групп\nВсего групп: {len(groups)}", GROUPS_MENU)
+            await send_safe(uid, context.bot, f"✅ Группа {group} добавлена!", GROUPS_MENU)
         else:
-            await send_safe(uid, context.bot, "❌ Отправьте текстовый файл", CANCEL_BTN)
+            await send_safe(uid, context.bot, f"⚠️ Группа {group} уже есть", GROUPS_MENU)
         del user_states[uid]
     
     # РЕДАКТИРОВАНИЕ ТЕКСТА
@@ -1021,9 +730,10 @@ async def message_handler(update: Update, context):
         raw = [g.strip() for g in text.split(',') if g.strip()]
         groups = []
         for g in raw:
-            valid, group = validate_group_link(g)
-            if valid:
-                groups.append(group)
+            g = g.replace('https://t.me/', '@').replace('http://t.me/', '@').replace('t.me/', '@')
+            if not g.startswith('@'):
+                g = '@' + g
+            groups.append(g)
         
         if groups:
             if bid >= len(user_data[uid].get('broadcasts', [])):
@@ -1035,7 +745,7 @@ async def message_handler(update: Update, context):
             save_data()
             await send_safe(uid, context.bot, f"✅ Сохранено {len(groups)} групп!")
         else:
-            await send_safe(uid, context.bot, "❌ Не найдено корректных групп", CANCEL_BTN)
+            await send_safe(uid, context.bot, "❌ Не найдено групп", CANCEL_BTN)
             return
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
@@ -1119,7 +829,7 @@ async def message_handler(update: Update, context):
             await show_broadcast_menu(uid, context.bot, bid)
             return
         
-        match = re.match(r'^(\d{1,2}):(\d{2})$', text)
+        match = re.match(r'(\d{1,2}):(\d{2})', text)
         if match:
             hour = int(match.group(1))
             minute = int(match.group(2))
@@ -1131,9 +841,9 @@ async def message_handler(update: Update, context):
                 
                 user_data[uid]['broadcasts'][bid]['schedule'] = f"{hour:02d}:{minute:02d}"
                 save_data()
-                await send_safe(uid, context.bot, f"✅ Расписание: {hour:02d}:{minute:02d}\nРассылка будет запускаться автоматически")
+                await send_safe(uid, context.bot, f"✅ Расписание: {hour:02d}:{minute:02d}")
             else:
-                await send_safe(uid, context.bot, "❌ Неверное время (0-23:0-59)", CANCEL_BTN)
+                await send_safe(uid, context.bot, "❌ Неверное время", CANCEL_BTN)
                 return
         else:
             await send_safe(uid, context.bot, "❌ Формат: 14:30", CANCEL_BTN)
@@ -1166,7 +876,7 @@ async def message_handler(update: Update, context):
         try:
             await client.connect()
             await client.send_code_request(text)
-            await send_safe(uid, context.bot, "📲 Введите код из Telegram:\n\nФормат: code12345\n\n✅ Сессия будет сохранена на 30 дней", CANCEL_BTN)
+            await send_safe(uid, context.bot, "📲 Введите код из Telegram:\n\nФормат: code12345", CANCEL_BTN)
         except Exception as e:
             await send_safe(uid, context.bot, f"❌ Ошибка: {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
@@ -1216,23 +926,26 @@ async def message_handler(update: Update, context):
                 return
             try:
                 await client.sign_in(password=password)
-            except PasswordHashInvalidError:
-                await send_safe(uid, context.bot, "❌ Неверный пароль 2FA", CANCEL_BTN)
+            except:
+                await send_safe(uid, context.bot, "❌ Неверный пароль", CANCEL_BTN)
                 return
-            except Exception as e:
-                await send_safe(uid, context.bot, f"❌ Ошибка: {str(e)[:100]}", CANCEL_BTN)
-                return
-        except PhoneCodeInvalidError:
-            await send_safe(uid, context.bot, "❌ Неверный код подтверждения\nНачните заново /start", MAIN_MENU)
-            del user_states[uid]
-            return
         except Exception as e:
-            await send_safe(uid, context.bot, f"❌ Ошибка входа: {str(e)[:100]}", MAIN_MENU)
+            await send_safe(uid, context.bot, f"❌ {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
             return
         
         # Сохраняем информацию о сессии
-        await save_session_info(uid, phone)
+        if uid not in user_data:
+            save_user(uid)
+        if 'sessions' not in user_data[uid]:
+            user_data[uid]['sessions'] = {}
+        user_data[uid]['sessions'] = {
+            'phone': phone,
+            'is_authorized': True,
+            'last_used': str(datetime.now()),
+            'session_file': get_session_path(uid)
+        }
+        save_data()
         
         # Проверка групп
         valid_groups = []
@@ -1244,7 +957,7 @@ async def message_handler(update: Update, context):
                 await send_safe(uid, context.bot, f"⚠️ {group} - недоступна")
         
         if not valid_groups:
-            await send_safe(uid, context.bot, "❌ Нет доступных групп!\nПроверьте что бот добавлен в группы", MAIN_MENU)
+            await send_safe(uid, context.bot, "❌ Нет доступных групп!", MAIN_MENU)
             del user_states[uid]
             return
         
@@ -1252,7 +965,7 @@ async def message_handler(update: Update, context):
         save_data()
         
         if is_247:
-            await send_safe(uid, context.bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}\n\n✅ Сессия сохранена на 30 дней!", MAIN_MENU)
+            await send_safe(uid, context.bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}\n\n✅ Сессия сохранена!", MAIN_MENU)
             task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
             active_tasks[f"{uid}_{bid}"] = task
             bc['active'] = True
@@ -1265,25 +978,18 @@ async def message_handler(update: Update, context):
                     await client.send_message(group, msg)
                     success += 1
                     await asyncio.sleep(2)
-                except FloodWaitError as e:
-                    await asyncio.sleep(e.seconds)
-                except Exception as e:
-                    await send_safe(uid, context.bot, f"❌ {group}: {str(e)[:50]}")
-            await send_safe(uid, context.bot, f"✅ Отправлено: {success}/{len(valid_groups)}\n\n✅ Сессия сохранена!", MAIN_MENU)
+                except:
+                    pass
+            await send_safe(uid, context.bot, f"✅ Отправлено: {success}/{len(valid_groups)}", MAIN_MENU)
         
         del user_states[uid]
 
 # ==================== БЕСКОНЕЧНАЯ РАССЫЛКА 24/7 ====================
-@log_error
 async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min, random_max):
-    """Бесконечная рассылка 24/7"""
     sent = 0
-    errors = 0
-    start_time = datetime.now()
-    
     try:
         while True:
-            for idx, group in enumerate(groups, 1):
+            for group in groups:
                 try:
                     await client.send_message(group, text)
                     sent += 1
@@ -1293,21 +999,12 @@ async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min
                         user_data[uid]['total_sent'] = user_data[uid].get('total_sent', 0) + 1
                         save_data()
                     
-                    print(f"[SEND] {uid} -> {group} (#{sent}) | Круг: {idx}/{len(groups)}")
-                    
+                    print(f"[SEND] {uid} -> {group} (#{sent})")
                 except FloodWaitError as e:
                     await asyncio.sleep(e.seconds)
-                    try:
-                        await client.send_message(group, text)
-                        sent += 1
-                    except:
-                        errors += 1
-                except ChatWriteForbiddenError:
-                    await asyncio.sleep(1)
                 except Exception as e:
-                    errors += 1
                     if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
-                        user_data[uid]['broadcasts'][bid]['errors'] = errors
+                        user_data[uid]['broadcasts'][bid]['errors'] = user_data[uid]['broadcasts'][bid].get('errors', 0) + 1
                         user_data[uid]['total_errors'] = user_data[uid].get('total_errors', 0) + 1
                         save_data()
                 
@@ -1315,78 +1012,32 @@ async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min
                 if random_min and random_max:
                     delay = random.randint(random_min, random_max)
                 await asyncio.sleep(delay)
-            
-            # Круг завершён
-            elapsed = int((datetime.now() - start_time).total_seconds())
-            print(f"[CYCLE] {uid} завершил круг | Отправлено: {sent} | Ошибок: {errors} | Время: {elapsed}с")
-    
     except asyncio.CancelledError:
         if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
             user_data[uid]['broadcasts'][bid]['active'] = False
             save_data()
-        print(f"[STOP] Рассылка {uid}_{bid} остановлена | Всего отправлено: {sent}")
+        print(f"[STOP] Рассылка {uid}_{bid} остановлена")
 
 # ==================== ЗАПУСК БОТА ====================
-async def main_async():
-    """Асинхронный запуск бота"""
+def main():
     load_data()
     
-    # Создаём приложение
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Регистрация обработчиков
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("skip", skip_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    app.add_handler(MessageHandler(filters.Document.ALL, message_handler))
     
-    # Установка команд бота
-    await app.bot.set_my_commands([
-        BotCommand("start", "Главное меню"),
-        BotCommand("skip", "Пропустить 2FA"),
-    ])
+    print("=" * 60)
+    print("✅ SENDFLOW БОТ ЗАПУЩЕН")
+    print("=" * 60)
+    print("📌 КНОПКИ РАБОТАЮТ")
+    print("📌 ДАННЫЕ СОХРАНЯЮТСЯ")
+    print("📌 СЕССИИ СОХРАНЯЮТСЯ")
+    print("=" * 60)
     
-    # Запуск фоновых задач
-    asyncio.create_task(auto_save_loop())
-    asyncio.create_task(check_and_run_scheduled())
-    
-    print("=" * 70)
-    print("🥓 SENDFLOW БОТ V4.0 - ЗАПУЩЕН")
-    print("=" * 70)
-    print(f"📁 Данные: {DATA_FILE}")
-    print(f"📁 Бэкап: {BACKUP_FILE}")
-    print(f"📁 Сессии: {SESSIONS_DIR}")
-    print(f"📁 Логи: {LOG_DIR}")
-    print("=" * 70)
-    print("✅ ВСЕ КОМПОНЕНТЫ РАБОТАЮТ")
-    print("✅ СЕССИИ СОХРАНЯЮТСЯ НА 30 ДНЕЙ")
-    print("✅ АВТОМАТИЧЕСКОЕ РАСПИСАНИЕ ВКЛЮЧЕНО")
-    print("✅ ФОНОВОЕ АВТОСОХРАНЕНИЕ ВКЛЮЧЕНО")
-    print("=" * 70)
-    
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    
-    # Держим бота живым
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except KeyboardInterrupt:
-        print("\n🛑 Бот остановлен")
-        await app.stop()
-        await app.shutdown()
-
-def main():
-    """Точка входа"""
-    try:
-        asyncio.run(main_async())
-    except KeyboardInterrupt:
-        print("\n🛑 Бот остановлен пользователем")
-    except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
-        traceback.print_exc()
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
