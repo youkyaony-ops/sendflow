@@ -756,4 +756,778 @@ async def import_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /info - Информация о боте"""
     info_text = """
-🤖 <b>SENDF
+🤖 <b>SENDFLOW - Telegram Mass Sender</b> 🤖
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>📋 О БОТЕ:</b>
+• Версия: 3.0.0
+• Разработчик: @Gothbreach
+• Дата релиза: 06.06.2026
+• Лицензия: MIT
+
+<b>⚡ ВОЗМОЖНОСТИ:</b>
+• Массовая рассылка 24/7
+• Отправка в несколько групп
+• Поддержка 2FA
+• Автосохранение
+• Бэкап данных
+• Расширенная статистика
+
+<b>📊 СТАТИСТИКА БОТА:</b>
+• Пользователей: {len(user_data)}
+• Активных рассылок: {sum(1 for u in user_data.values() for b in u.get('broadcasts', []) if b.get('active'))}
+• Отправлено сообщений: {sum(u.get('total_sent', 0) for u in user_data.values())}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<i>Спасибо, что выбираете SendFlow! 🌟</i>
+    """
+    
+    await update.message.reply_text(info_text.format(len(user_data)), parse_mode='HTML', reply_markup=BACK_KEYBOARD)
+
+# ==================== ОБРАБОТЧИК КНОПОК ====================
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Основной обработчик нажатий на кнопки"""
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    data = query.data
+    
+    try:
+        await query.message.delete()
+    except:
+        pass
+    
+    # Главное меню
+    if data == 'back_to_main':
+        await main_menu(uid, context.bot)
+    
+    elif data == 'my_broadcasts':
+        await show_my_broadcasts(uid, context.bot)
+    
+    elif data == 'create_broadcast':
+        await create_new_broadcast(uid, context.bot)
+    
+    elif data == 'global_stats':
+        await show_global_stats(uid, context.bot)
+    
+    elif data == 'settings':
+        await show_settings(uid, context.bot)
+    
+    elif data == 'my_groups':
+        await groups_command(update, context)
+    
+    elif data == 'backup_data':
+        await backup_command(update, context)
+    
+    elif data == 'help_menu':
+        await help_command(update, context)
+    
+    elif data == 'about':
+        await info_command(update, context)
+    
+    # Настройки
+    elif data == 'set_lang':
+        await set_language(uid, context.bot)
+    elif data == 'set_notify':
+        await toggle_notifications(uid, context.bot)
+    elif data == 'set_theme':
+        await toggle_theme(uid, context.bot)
+    elif data == 'set_autosave':
+        await toggle_autosave(uid, context.bot)
+    elif data == 'set_max':
+        await set_max_broadcasts(uid, context.bot)
+    elif data == 'set_def_interval':
+        await set_default_interval(uid, context.bot)
+    elif data == 'backup_now':
+        await backup_command(update, context)
+    elif data == 'clear_data':
+        await clear_command(update, context)
+    
+    # Группы
+    elif data == 'add_group':
+        user_data[uid]['step'] = 'add_group'
+        save_data()
+        await context.bot.send_message(uid, "➕ Введите ссылку на группу:\nПример: @group_name", reply_markup=CANCEL_KEYBOARD)
+    elif data == 'list_groups':
+        await groups_command(update, context)
+    elif data == 'remove_group':
+        user_data[uid]['step'] = 'remove_group'
+        save_data()
+        await context.bot.send_message(uid, "🗑 Введите название группы для удаления:", reply_markup=CANCEL_KEYBOARD)
+    elif data == 'import_groups':
+        user_data[uid]['step'] = 'import_groups'
+        save_data()
+        await context.bot.send_message(uid, "📤 Отправьте список групп (по одной на строку или через запятую):", reply_markup=CANCEL_KEYBOARD)
+    elif data == 'export_groups':
+        await export_command(update, context)
+    
+    # Статистика
+    elif data == 'stats_by_broadcast':
+        await stats_by_broadcast(uid, context.bot)
+    elif data == 'stats_by_day':
+        await stats_by_day(uid, context.bot)
+    elif data == 'stats_top_groups':
+        await stats_top_groups(uid, context.bot)
+    elif data == 'stats_graph':
+        await stats_graph(uid, context.bot)
+    
+    # Помощь
+    elif data == 'help_quick':
+        await help_quick(uid, context.bot)
+    elif data == 'help_create':
+        await help_create(uid, context.bot)
+    elif data == 'help_modes':
+        await help_modes(uid, context.bot)
+    elif data == 'help_errors':
+        await help_errors(uid, context.bot)
+    elif data == 'help_tips':
+        await help_tips(uid, context.bot)
+    
+    # Отмена
+    elif data == 'cancel_action':
+        if uid in user_data:
+            user_data[uid].pop('step', None)
+            save_data()
+        await main_menu(uid, context.bot)
+    
+    elif data == 'confirm_clear':
+        if uid in user_data:
+            user_data[uid] = {
+                'broadcasts': [],
+                'groups': [],
+                'settings': UserSettings(user_id=uid).__dict__,
+                'created_at': str(datetime.now()),
+                'total_sent': 0,
+                'total_errors': 0
+            }
+            save_data()
+        await context.bot.send_message(uid, "✅ Все данные очищены!", reply_markup=MAIN_KEYBOARD)
+    
+    # Обработка выбора рассылки
+    elif data.startswith('select_bc_'):
+        bid = int(data.split('_')[2])
+        user_data[uid]['current_bid'] = bid
+        save_data()
+        await show_broadcast_menu(uid, context.bot, bid)
+
+async def show_my_broadcasts(user_id: int, bot):
+    """Показать список рассылок пользователя"""
+    broadcasts = user_data.get(user_id, {}).get('broadcasts', [])
+    
+    if not broadcasts:
+        await bot.send_message(user_id, "📢 У вас нет рассылок\n\nСоздайте первую рассылку через кнопку '➕ СОЗДАТЬ РАССЫЛКУ'", reply_markup=MAIN_KEYBOARD)
+        return
+    
+    keyboard = []
+    for i, bc in enumerate(broadcasts):
+        status = "🟢" if bc.get('active', False) else "🔴"
+        name = bc.get('name', f'Рассылка {i+1}')
+        keyboard.append([InlineKeyboardButton(f"{status} {name}", callback_data=f'select_bc_{i}')])
+    
+    keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')])
+    
+    await bot.send_message(user_id, "📋 **СПИСОК РАССЫЛОК**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def create_new_broadcast(user_id: int, bot):
+    """Создание новой рассылки"""
+    broadcasts = user_data.get(user_id, {}).get('broadcasts', [])
+    
+    if len(broadcasts) >= MAX_BROADCASTS:
+        await bot.send_message(user_id, f"❌ Достигнут лимит рассылок ({MAX_BROADCASTS})\n\nУдалите ненужные рассылки чтобы создать новую.")
+        return
+    
+    new_broadcast = {
+        'name': f'Рассылка {len(broadcasts)+1}',
+        'text': None,
+        'groups': [],
+        'interval': DEFAULT_INTERVAL,
+        'active': False,
+        'loop': True,
+        'sent_count': 0,
+        'errors': 0,
+        'created_at': str(datetime.now())
+    }
+    
+    broadcasts.append(new_broadcast)
+    user_data[user_id]['broadcasts'] = broadcasts
+    save_data()
+    
+    bid = len(broadcasts) - 1
+    await show_broadcast_menu(user_id, bot, bid)
+
+async def show_broadcast_menu(user_id: int, bot, bid: int):
+    """Показать меню управления рассылкой"""
+    broadcast = user_data.get(user_id, {}).get('broadcasts', [])[bid]
+    name = broadcast.get('name', f'Рассылка {bid+1}')
+    
+    status = "🟢 АКТИВНА" if broadcast.get('active') else "🔴 ОСТАНОВЛЕНА"
+    text_status = "✅" if broadcast.get('text') else "❌"
+    groups_count = len(broadcast.get('groups', []))
+    interval = broadcast.get('interval', DEFAULT_INTERVAL)
+    sent = broadcast.get('sent_count', 0)
+    
+    menu_text = f"""
+📢 <b>{name}</b>
+
+━━━━━━━━━━━━━━━━━━━━━━
+<b>Статус:</b> {status}
+<b>Текст:</b> {text_status}
+<b>Групп:</b> {groups_count}
+<b>Интервал:</b> {interval} сек
+<b>Отправлено:</b> {sent}
+<b>Зациклено:</b> {'✅' if broadcast.get('loop', True) else '❌'}
+━━━━━━━━━━━━━━━━━━━━━━
+
+<b>⚙️ УПРАВЛЕНИЕ:</b>
+    """
+    
+    await bot.send_message(user_id, menu_text, parse_mode='HTML', reply_markup=BROADCAST_MENU)
+
+async def main_menu(user_id: int, bot):
+    """Главное меню"""
+    await bot.send_message(user_id, "🏠 <b>ГЛАВНОЕ МЕНЮ</b>\n\nВыберите действие:", parse_mode='HTML', reply_markup=MAIN_KEYBOARD)
+
+# ==================== СОХРАНЕНИЕ ДАННЫХ ====================
+def save_data():
+    """Сохранение всех данных"""
+    try:
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            clean_data = {}
+            for uid, data in user_data.items():
+                clean_data[str(uid)] = {
+                    'broadcasts': data.get('broadcasts', []),
+                    'groups': data.get('groups', []),
+                    'settings': data.get('settings', {}),
+                    'created_at': data.get('created_at', str(datetime.now())),
+                    'total_sent': data.get('total_sent', 0),
+                    'total_errors': data.get('total_errors', 0)
+                }
+            json.dump(clean_data, f, ensure_ascii=False, indent=2)
+        logger.info(f"Данные сохранены для {len(user_data)} пользователей")
+    except Exception as e:
+        logger.error(f"Ошибка сохранения: {e}")
+
+def load_data():
+    """Загрузка всех данных"""
+    global user_data
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+                user_data = {int(k): v for k, v in loaded.items()}
+            logger.info(f"Данные загружены для {len(user_data)} пользователей")
+    except Exception as e:
+        logger.error(f"Ошибка загрузки: {e}")
+        user_data = {}
+
+# ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстовых сообщений"""
+    try:
+        uid = update.effective_user.id
+        text = update.message.text.strip()
+        
+        if uid not in user_data:
+            user_data[uid] = {
+                'broadcasts': [],
+                'groups': [],
+                'settings': UserSettings(user_id=uid).__dict__,
+                'created_at': str(datetime.now()),
+                'total_sent': 0,
+                'total_errors': 0
+            }
+            save_data()
+        
+        step = user_data[uid].get('step')
+        
+        if not step:
+            await main_menu(uid, context.bot)
+            return
+        
+        # Обработка добавления группы
+        if step == 'add_group':
+            # Форматируем группу
+            group = text.replace('https://t.me/', '@').replace('http://t.me/', '@').replace('t.me/', '@')
+            if not group.startswith('@'):
+                group = '@' + group
+            
+            groups = user_data[uid].get('groups', [])
+            if group not in groups:
+                groups.append(group)
+                user_data[uid]['groups'] = groups
+                save_data()
+                await update.message.reply_text(f"✅ Группа {group} добавлена!")
+            else:
+                await update.message.reply_text(f"⚠️ Группа {group} уже есть в списке")
+            
+            user_data[uid].pop('step')
+            save_data()
+            await groups_command(update, context)
+        
+        # Обработка удаления группы
+        elif step == 'remove_group':
+            group = text
+            groups = user_data[uid].get('groups', [])
+            
+            if group in groups:
+                groups.remove(group)
+                user_data[uid]['groups'] = groups
+                save_data()
+                await update.message.reply_text(f"✅ Группа {group} удалена!")
+            else:
+                await update.message.reply_text(f"❌ Группа {group} не найдена")
+            
+            user_data[uid].pop('step')
+            save_data()
+            await groups_command(update, context)
+        
+        # Обработка импорта групп
+        elif step == 'import_groups':
+            lines = text.replace('\n', ',').split(',')
+            new_groups = []
+            for line in lines:
+                group = line.strip()
+                if group:
+                    group = group.replace('https://t.me/', '@').replace('http://t.me/', '@').replace('t.me/', '@')
+                    if not group.startswith('@'):
+                        group = '@' + group
+                    new_groups.append(group)
+            
+            groups = user_data[uid].get('groups', [])
+            groups.extend(new_groups)
+            groups = list(dict.fromkeys(groups))  # Удаляем дубликаты
+            user_data[uid]['groups'] = groups
+            save_data()
+            
+            await update.message.reply_text(f"✅ Импортировано {len(new_groups)} групп\nВсего групп: {len(groups)}")
+            user_data[uid].pop('step')
+            save_data()
+            await groups_command(update, context)
+        
+        # Обработка тестовой отправки
+        elif step == 'waiting_test_group':
+            group = text
+            group = group.replace('https://t.me/', '@').replace('http://t.me/', '@').replace('t.me/', '@')
+            if not group.startswith('@'):
+                group = '@' + group
+            
+            await update.message.reply_text(f"🧪 Отправляю тестовое сообщение в {group}...")
+            
+            # Здесь код отправки тестового сообщения
+            # Требуется авторизация
+            
+            user_data[uid].pop('step')
+            save_data()
+        
+        # Обработка отзыва
+        elif step == 'waiting_feedback':
+            feedback = text
+            
+            # Отправляем админу
+            try:
+                await context.bot.send_message(
+                    ADMIN_ID,
+                    f"📝 <b>НОВЫЙ ОТЗЫВ</b>\n\n"
+                    f"От: {update.effective_user.first_name} (ID: {uid})\n"
+                    f"Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                    f"{feedback}",
+                    parse_mode='HTML'
+                )
+                await update.message.reply_text("✅ Спасибо за отзыв! Он передан разработчику.")
+            except:
+                await update.message.reply_text("❌ Ошибка отправки отзыва")
+            
+            user_data[uid].pop('step')
+            save_data()
+        
+        # Обработка репорта
+        elif step == 'waiting_report':
+            report = text
+            
+            try:
+                await context.bot.send_message(
+                    ADMIN_ID,
+                    f"🐛 <b>НОВЫЙ РЕПОРТ ОБ ОШИБКЕ</b>\n\n"
+                    f"От: {update.effective_user.first_name} (ID: {uid})\n"
+                    f"Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                    f"{report}",
+                    parse_mode='HTML'
+                )
+                await update.message.reply_text("✅ Сообщение об ошибке отправлено разработчику.")
+            except:
+                await update.message.reply_text("❌ Ошибка отправки репорта")
+            
+            user_data[uid].pop('step')
+            save_data()
+        
+        # Обработка импорта файла
+        elif step == 'waiting_import_file':
+            if update.message.document:
+                file = await update.message.document.get_file()
+                import_data = await file.download_as_bytearray()
+                
+                try:
+                    data = json.loads(import_data.decode('utf-8'))
+                    user_data[uid]['broadcasts'] = data.get('broadcasts', [])
+                    user_data[uid]['groups'] = data.get('groups', [])
+                    user_data[uid]['settings'] = data.get('settings', user_data[uid].get('settings', {}))
+                    save_data()
+                    await update.message.reply_text("✅ Импорт успешно завершён!")
+                except Exception as e:
+                    await update.message.reply_text(f"❌ Ошибка импорта: {str(e)[:100]}")
+            else:
+                await update.message.reply_text("❌ Отправьте JSON файл")
+            
+            user_data[uid].pop('step')
+            save_data()
+            await main_menu(uid, context.bot)
+        
+        else:
+            await main_menu(uid, context.bot)
+    
+    except Exception as e:
+        logger.error(f"Ошибка в message_handler: {e}")
+        await update.message.reply_text("❌ Произошла ошибка, попробуйте /start")
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ МЕНЮ ====================
+async def show_settings(user_id: int, bot):
+    """Показать настройки"""
+    settings = user_data.get(user_id, {}).get('settings', {})
+    
+    settings_text = f"""
+⚙️ <b>НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ</b> ⚙️
+
+━━━━━━━━━━━━━━━━━━━━━━
+🌐 Язык: {settings.get('language', 'ru').upper()}
+🔔 Уведомления: {'✅' if settings.get('notifications', True) else '❌'}
+🎨 Тёмная тема: {'✅' if settings.get('dark_mode', False) else '❌'}
+💾 Автосохранение: {'✅' if settings.get('auto_save', True) else '❌'}
+⚡ Макс. рассылок: {settings.get('max_concurrent', 3)}
+⏱ Интервал по умолч.: {settings.get('default_interval', DEFAULT_INTERVAL)} сек
+━━━━━━━━━━━━━━━━━━━━━━
+    """
+    
+    await bot.send_message(user_id, settings_text, parse_mode='HTML', reply_markup=SETTINGS_KEYBOARD)
+
+async def show_global_stats(user_id: int, bot):
+    """Показать глобальную статистику"""
+    data = user_data.get(user_id, {})
+    broadcasts = data.get('broadcasts', [])
+    
+    active = sum(1 for b in broadcasts if b.get('active', False))
+    total_sent = data.get('total_sent', 0)
+    
+    stats_text = f"""
+📊 <b>ГЛОБАЛЬНАЯ СТАТИСТИКА</b> 📊
+
+━━━━━━━━━━━━━━━━━━━━━━
+<b>📢 Рассылки:</b>
+• Всего: {len(broadcasts)}
+• Активных: {active}
+• Остановлено: {len(broadcasts) - active}
+
+<b>📨 Отправки:</b>
+• Всего отправлено: {total_sent}
+• В среднем: {total_sent // max(1, len(broadcasts))} на рассылку
+
+<b>👥 Группы:</b>
+• Сохранено групп: {len(data.get('groups', []))}
+
+━━━━━━━━━━━━━━━━━━━━━━
+    """
+    
+    await bot.send_message(user_id, stats_text, parse_mode='HTML', reply_markup=STATS_KEYBOARD)
+
+async def set_language(user_id: int, bot):
+    """Установка языка"""
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🇷🇺 Русский", callback_data='lang_ru')],
+        [InlineKeyboardButton("🇬🇧 English", callback_data='lang_en')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='settings')]
+    ])
+    await bot.send_message(user_id, "🌐 Выберите язык / Choose language:", reply_markup=keyboard)
+
+async def toggle_notifications(user_id: int, bot):
+    """Переключение уведомлений"""
+    settings = user_data[user_id].get('settings', {})
+    current = settings.get('notifications', True)
+    settings['notifications'] = not current
+    user_data[user_id]['settings'] = settings
+    save_data()
+    await bot.send_message(user_id, f"🔔 Уведомления: {'ВКЛЮЧЕНЫ' if not current else 'ВЫКЛЮЧЕНЫ'}")
+    await show_settings(user_id, bot)
+
+async def toggle_theme(user_id: int, bot):
+    """Переключение темы"""
+    settings = user_data[user_id].get('settings', {})
+    current = settings.get('dark_mode', False)
+    settings['dark_mode'] = not current
+    user_data[user_id]['settings'] = settings
+    save_data()
+    await bot.send_message(user_id, f"🎨 Тема: {'ТЁМНАЯ' if not current else 'СВЕТЛАЯ'}")
+    await show_settings(user_id, bot)
+
+async def toggle_autosave(user_id: int, bot):
+    """Переключение автосохранения"""
+    settings = user_data[user_id].get('settings', {})
+    current = settings.get('auto_save', True)
+    settings['auto_save'] = not current
+    user_data[user_id]['settings'] = settings
+    save_data()
+    await bot.send_message(user_id, f"💾 Автосохранение: {'ВКЛЮЧЕНО' if not current else 'ВЫКЛЮЧЕНО'}")
+    await show_settings(user_id, bot)
+
+async def set_max_broadcasts(user_id: int, bot):
+    """Установка максимального количества рассылок"""
+    user_data[user_id]['step'] = 'set_max_broadcasts'
+    save_data()
+    await bot.send_message(user_id, f"⚡ Введите максимальное количество рассылок (1-{MAX_BROADCASTS}):", reply_markup=CANCEL_KEYBOARD)
+
+async def set_default_interval(user_id: int, bot):
+    """Установка интервала по умолчанию"""
+    user_data[user_id]['step'] = 'set_default_interval'
+    save_data()
+    await bot.send_message(user_id, f"⏱ Введите интервал по умолчанию ({MIN_INTERVAL}-{MAX_INTERVAL} сек):", reply_markup=CANCEL_KEYBOARD)
+
+async def stats_by_broadcast(user_id: int, bot):
+    """Статистика по рассылкам"""
+    broadcasts = user_data.get(user_id, {}).get('broadcasts', [])
+    
+    if not broadcasts:
+        await bot.send_message(user_id, "❌ Нет рассылок для отображения статистики")
+        return
+    
+    text = "📊 <b>СТАТИСТИКА ПО РАССЫЛКАМ</b>\n\n"
+    for i, b in enumerate(broadcasts, 1):
+        text += f"{i}. {b.get('name', f'Рассылка {i}')}\n"
+        text += f"   📨 Отправлено: {b.get('sent_count', 0)}\n"
+        text += f"   ❌ Ошибок: {b.get('errors', 0)}\n"
+        text += f"   🟢 Статус: {'Активна' if b.get('active') else 'Остановлена'}\n\n"
+    
+    await bot.send_message(user_id, text, parse_mode='HTML', reply_markup=STATS_KEYBOARD)
+
+async def stats_by_day(user_id: int, bot):
+    """Статистика по дням"""
+    # Здесь можно добавить график или статистику по дням из БД
+    await bot.send_message(user_id, "📅 <b>СТАТИСТИКА ПО ДНЯМ</b>\n\nФункция в разработке...", parse_mode='HTML', reply_markup=STATS_KEYBOARD)
+
+async def stats_top_groups(user_id: int, bot):
+    """Топ групп по отправкам"""
+    await bot.send_message(user_id, "🏆 <b>ТОП ГРУПП ПО ОТПРАВКАМ</b>\n\nФункция в разработке...", parse_mode='HTML', reply_markup=STATS_KEYBOARD)
+
+async def stats_graph(user_id: int, bot):
+    """График статистики"""
+    await bot.send_message(user_id, "📈 <b>ГРАФИК СТАТИСТИКИ</b>\n\nФункция в разработке...", parse_mode='HTML', reply_markup=STATS_KEYBOARD)
+
+async def help_quick(user_id: int, bot):
+    """Быстрая помощь"""
+    text = """
+🚀 <b>БЫСТРЫЙ СТАРТ ЗА 3 ШАГА</b> 🚀
+
+1️⃣ <b>СОЗДАЙТЕ РАССЫЛКУ</b>
+Нажмите кнопку "➕ СОЗДАТЬ РАССЫЛКУ"
+
+2️⃣ <b>НАСТРОЙТЕ ПАРАМЕТРЫ</b>
+• Текст сообщения
+• Группы для отправки
+• Интервал между сообщениями
+
+3️⃣ <b>ЗАПУСТИТЕ РАССЫЛКУ</b>
+• "🚀 ЗАПУСТИТЬ 24/7" - для бесконечной работы
+• "▶️ ОТПРАВИТЬ РАЗОМ" - для единоразовой отправки
+
+⚠️ При первом запуске потребуется авторизация в Telegram!
+    """
+    await bot.send_message(user_id, text, parse_mode='HTML', reply_markup=HELP_KEYBOARD)
+
+async def help_create(user_id: int, bot):
+    """Помощь по созданию рассылки"""
+    text = """
+📢 <b>КАК СОЗДАТЬ РАССЫЛКУ ПОДРОБНО</b> 📢
+
+<b>1. ТЕКСТ СООБЩЕНИЯ</b>
+• Можно использовать эмодзи, ссылки, форматирование
+• Максимальная длина: 4096 символов
+• Поддерживаются кнопки (раздел "КНОПКИ")
+
+<b>2. ГРУППЫ ДЛЯ РАССЫЛКИ</b>
+• Форматы: @group, t.me/group, https://t.me/group
+• Несколько групп указывайте через запятую
+• Бот должен быть участником группы
+
+<b>3. ИНТЕРВАЛ</b>
+• Минимальный: 5 секунд
+• Рекомендуемый: 30-60 секунд
+• Максимальный: 3600 секунд (1 час)
+
+<b>4. ДОПОЛНИТЕЛЬНЫЕ НАСТРОЙКИ</b>
+• Рандом - случайная задержка
+• Зациклить - бесконечный повтор
+• Расписание - запуск по времени
+• Спинтакс - генерация вариантов текста
+    """
+    await bot.send_message(user_id, text, parse_mode='HTML', reply_markup=HELP_KEYBOARD)
+
+async def help_modes(user_id: int, bot):
+    """Помощь по режимам работы"""
+    text = """
+🔄 <b>РЕЖИМЫ РАБОТЫ РАССЫЛКИ</b> 🔄
+
+<b>🚀 РЕЖИМ 24/7 (БЕСКОНЕЧНЫЙ)</b>
+• Сообщение отправляется по кругу
+• Группа1 → Группа2 → ... → ГруппаN → Группа1
+• Работает без остановки 24/7/365
+• Подходит для постоянного присутствия
+
+<b>▶️ РАЗОВЫЙ РЕЖИМ</b>
+• Одно сообщение во все группы
+• После отправки рассылка останавливается
+• Подходит для анонсов и объявлений
+
+<b>📅 РЕЖИМ ПО РАСПИСАНИЮ</b>
+• Запуск в указанное время
+• Можно настроить повторение
+• Подходит для регулярных постов
+
+<b>🎲 РЕЖИМ С РАНДОМОМ</b>
+• Случайная задержка между сообщениями
+• Интервал: от X до Y секунд
+• Имитирует естественное поведение
+    """
+    await bot.send_message(user_id, text, parse_mode='HTML', reply_markup=HELP_KEYBOARD)
+
+async def help_errors(user_id: int, bot):
+    """Помощь по ошибкам"""
+    text = """
+🔧 <b>ЧАСТЫЕ ОШИБКИ И РЕШЕНИЯ</b> 🔧
+
+<b>❌ ОШИБКА 2FA (Двухфакторная аутентификация)</b>
+Решение: Введи пароль от Telegram. Если нет 2FA - нажми /skip
+
+<b>❌ ГРУППА НЕДОСТУПНА</b>
+Решение: Добавь бота в группу и дай права на отправку сообщений
+
+<b>❌ ФЛУД-КОНТРОЛЬ (FloodWaitError)</b>
+Решение: Увеличь интервал между сообщениями до 30+ секунд
+
+<b>❌ НЕВЕРНЫЙ НОМЕР ТЕЛЕФОНА</b>
+Решение: Используй формат +79123456789 (с кодом страны)
+
+<b>❌ НЕВЕРНЫЙ КОД ПОДТВЕРЖДЕНИЯ</b>
+Решение: Введи код в формате: code12345 (только цифры)
+
+<b>❌ НЕТ ПРАВ НА ОТПРАВКУ</b>
+Решение: Сделай бота администратором группы
+
+<b>❌ СЕССИЯ УСТАРЕЛА</b>
+Решение: Начни заново через /start и авторизуйся снова
+    """
+    await bot.send_message(user_id, text, parse_mode='HTML', reply_markup=HELP_KEYBOARD)
+
+async def help_tips(user_id: int, bot):
+    """Советы по использованию"""
+    text = """
+💡 <b>ПОЛЕЗНЫЕ СОВЕТЫ ДЛЯ РАБОТЫ</b> 💡
+
+<b>📌 ОПТИМИЗАЦИЯ РАССЫЛКИ</b>
+• Ставь интервал 30-60 секунд для безопасности
+• Используй до 5 групп одновременно
+• Проверяй доступность групп перед запуском
+
+<b>📌 БЕЗОПАСНОСТЬ</b>
+• Регулярно делай бэкап настроек
+• Не храни пароли в открытом виде
+• Используй надёжный номер телефона
+
+<b>📌 ЭФФЕКТИВНОСТЬ</b>
+• Персонализируй текст для каждой группы
+• Используй кнопки для повышения кликабельности
+• Анализируй статистику для улучшения
+
+<b>📌 АВТОМАТИЗАЦИЯ</b>
+• Настрой расписание для регулярных постов
+• Используй функцию "Клонировать" для похожих рассылок
+• Сохраняй группы в разделе "Мои группы"
+
+<b>📌 ПОДДЕРЖКА</b>
+• /feedback - для предложений
+• /report - для сообщения об ошибках
+• /donate - для поддержки проекта
+    """
+    await bot.send_message(user_id, text, parse_mode='HTML', reply_markup=HELP_KEYBOARD)
+
+# ==================== ЗАПУСК БОТА ====================
+def main():
+    """Главная функция запуска бота"""
+    # Инициализация
+    init_database()
+    load_data()
+    
+    # Создание приложения
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Регистрация обработчиков команд
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("skip", skip_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("groups", groups_command))
+    app.add_handler(CommandHandler("backup", backup_command))
+    app.add_handler(CommandHandler("clear", clear_command))
+    app.add_handler(CommandHandler("feedback", feedback_command))
+    app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("donate", donate_command))
+    app.add_handler(CommandHandler("cancel", cancel_command))
+    app.add_handler(CommandHandler("restart", restart_command))
+    app.add_handler(CommandHandler("pause_all", pause_all_command))
+    app.add_handler(CommandHandler("resume_all", resume_all_command))
+    app.add_handler(CommandHandler("test", test_command))
+    app.add_handler(CommandHandler("export", export_command))
+    app.add_handler(CommandHandler("import", import_command))
+    app.add_handler(CommandHandler("info", info_command))
+    
+    # Регистрация обработчиков кнопок и сообщений
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    app.add_handler(MessageHandler(filters.Document.ALL, message_handler))
+    
+    # Вывод информации о запуске
+    print("=" * 70)
+    print("🥕 SENDFLOW - Telegram Mass Sender Bot v3.0")
+    print("=" * 70)
+    print(f"📁 Логи: {LOG_DIR}")
+    print(f"📁 База данных: {DATABASE_FILE}")
+    print(f"📁 Данные пользователей: {DATA_FILE}")
+    print("=" * 70)
+    print("📌 ДОСТУПНЫЕ КОМАНДЫ:")
+    print("   /start    - Главное меню")
+    print("   /help     - Полная справка")
+    print("   /stats    - Моя статистика")
+    print("   /groups   - Мои группы")
+    print("   /backup   - Создать бэкап")
+    print("   /export   - Экспорт настроек")
+    print("   /import   - Импорт настроек")
+    print("   /feedback - Отправить отзыв")
+    print("   /report   - Сообщить об ошибке")
+    print("   /donate   - Поддержать проект")
+    print("   /restart  - Перезапуск рассылок")
+    print("   /pause_all- Пауза всех рассылок")
+    print("   /test     - Тестовая отправка")
+    print("=" * 70)
+    print("✅ БОТ УСПЕШНО ЗАПУЩЕН И ГОТОВ К РАБОТЕ!")
+    print("=" * 70)
+    
+    # Запуск бота
+    try:
+        app.run_polling()
+    except KeyboardInterrupt:
+        print("\n🛑 Бот остановлен пользователем")
+        logger.info("Бот остановлен")
+    except Exception as e:
+        print(f"❌ Критическая ошибка: {e}")
+        logger.critical(f"Критическая ошибка: {e}")
+
+if __name__ == '__main__':
+    main()
