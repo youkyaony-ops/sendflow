@@ -5,6 +5,7 @@ import os
 import logging
 import time
 import random
+import signal
 from datetime import datetime, timedelta
 from telethon import TelegramClient, errors
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
@@ -26,7 +27,7 @@ if not os.path.exists(SESSIONS_DIR):
     os.makedirs(SESSIONS_DIR)
 
 user_data = {}
-active_tasks = {}  # Ключ: f"{uid}_{bid}"
+active_tasks = {}
 sessions = {}
 user_states = {}
 
@@ -171,6 +172,7 @@ HELP_MENU = InlineKeyboardMarkup([
 ])
 
 CANCEL_BTN = InlineKeyboardMarkup([[InlineKeyboardButton("❌ ОТМЕНА", callback_data='cancel')]])
+BACK_BTN = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]])
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
 async def send_safe(chat_id, bot, text, keyboard=None):
@@ -198,7 +200,10 @@ async def show_broadcast_menu(uid, bot, bid):
         return
     
     bc = broadcasts[bid]
-    status = "🟢 АКТИВНА" if bc.get('active') else "🔴 ОСТАНОВЛЕНА"
+    task_key = f"{uid}_{bid}"
+    is_running = task_key in active_tasks and not active_tasks[task_key].done()
+    
+    status = "🟢 АКТИВНА" if is_running else "🔴 ОСТАНОВЛЕНА"
     txt = f"📢 <b>{bc.get('name', f'Рассылка {bid+1}')}</b>\n\n"
     txt += f"Статус: {status}\n"
     txt += f"📝 Текст: {'✅' if bc.get('text') else '❌'}\n"
@@ -267,7 +272,9 @@ async def button_handler(update: Update, context):
         kb = []
         for i, bc in enumerate(broadcasts):
             name = bc.get('name', f'Рассылка {i+1}')
-            status = "🟢" if bc.get('active') else "🔴"
+            task_key = f"{uid}_{i}"
+            is_running = task_key in active_tasks and not active_tasks[task_key].done()
+            status = "🟢" if is_running else "🔴"
             kb.append([InlineKeyboardButton(f"{status} {name}", callback_data=f'select_bc_{i}')])
         kb.append([InlineKeyboardButton("➕ НОВАЯ РАССЫЛКА", callback_data='new_broadcast')])
         kb.append([InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')])
@@ -323,7 +330,11 @@ async def button_handler(update: Update, context):
             save_user(uid)
         data_u = user_data[uid]
         bc = data_u.get('broadcasts', [])
-        active = sum(1 for b in bc if b.get('active'))
+        active = 0
+        for i, b in enumerate(bc):
+            task_key = f"{uid}_{i}"
+            if task_key in active_tasks and not active_tasks[task_key].done():
+                active += 1
         total_sent = data_u.get('total_sent', 0)
         total_errors = data_u.get('total_errors', 0)
         
@@ -444,10 +455,9 @@ async def button_handler(update: Update, context):
             await show_broadcast_menu(uid, context.bot, bid)
             return
         
-        # ПРОВЕРКА: активна ли КОНКРЕТНАЯ рассылка
         task_key = f"{uid}_{bid}"
         if task_key in active_tasks and not active_tasks[task_key].done():
-            await send_safe(uid, context.bot, f"⚠️ Рассылка #{bid+1} уже запущена!\nОстановите её перед повторным запуском", BACK_BTN)
+            await send_safe(uid, context.bot, f"⚠️ Рассылка #{bid+1} уже запущена!", BACK_BTN)
             await show_broadcast_menu(uid, context.bot, bid)
             return
         
@@ -482,16 +492,43 @@ async def button_handler(update: Update, context):
         user_states[uid] = {'step': 'send_once', 'bid': bid}
         await send_safe(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789\n\n(Сессия сохранится на 30 дней)", CANCEL_BTN)
     
+    # ===== ИСПРАВЛЕННАЯ ОСТАНОВКА РАССЫЛКИ =====
     elif data.startswith('stop_broadcast_'):
         bid = int(data.split('_')[2])
         task_key = f"{uid}_{bid}"
-        if task_key in active_tasks:
-            active_tasks[task_key].cancel()
-            user_data[uid]['broadcasts'][bid]['active'] = False
-            save_data()
-            await send_safe(uid, context.bot, f"🛑 Рассылка #{bid+1} остановлена")
+        
+        if task_key in active_tasks and not active_tasks[task_key].done():
+            task = active_tasks[task_key]
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                print(f"Ошибка отмены: {e}")
+            finally:
+                if task_key in active_tasks:
+                    del active_tasks[task_key]
+                
+                # Закрываем клиента если нет других активных рассылок
+                if uid in sessions:
+                    other_tasks = [k for k in active_tasks.keys() if k.startswith(f"{uid}_")]
+                    if not other_tasks:
+                        try:
+                            await sessions[uid].disconnect()
+                        except:
+                            pass
+                        if uid in sessions:
+                            del sessions[uid]
+                
+                if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
+                    user_data[uid]['broadcasts'][bid]['active'] = False
+                    save_data()
+            
+            await send_safe(uid, context.bot, f"🛑 Рассылка #{bid+1} ОСТАНОВЛЕНА")
         else:
             await send_safe(uid, context.bot, f"❌ Рассылка #{bid+1} не активна")
+        
         await show_broadcast_menu(uid, context.bot, bid)
     
     elif data.startswith('bc_status_'):
@@ -538,8 +575,10 @@ async def button_handler(update: Update, context):
     elif data.startswith('delete_broadcast_'):
         bid = int(data.split('_')[2])
         task_key = f"{uid}_{bid}"
-        if task_key in active_tasks:
+        if task_key in active_tasks and not active_tasks[task_key].done():
             active_tasks[task_key].cancel()
+            if task_key in active_tasks:
+                del active_tasks[task_key]
         user_data[uid]['broadcasts'].pop(bid)
         save_data()
         await send_safe(uid, context.bot, f"🗑 Рассылка #{bid+1} удалена", MAIN_MENU)
@@ -633,7 +672,6 @@ async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
     random_min = bc.get('random_min', 0)
     random_max = bc.get('random_max', 0)
     
-    # Проверка групп
     valid_groups = []
     for group in groups:
         try:
@@ -647,6 +685,7 @@ async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
         return
     
     bc['groups'] = valid_groups
+    bc['active'] = True
     save_data()
     
     if is_247:
@@ -656,8 +695,6 @@ async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
         if task_key not in active_tasks or active_tasks[task_key].done():
             task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
             active_tasks[task_key] = task
-            bc['active'] = True
-            save_data()
             print(f"[START] Запущена рассылка #{bid+1} для пользователя {uid}")
         else:
             await send_safe(uid, bot, f"⚠️ Рассылка #{bid+1} уже запущена!", MAIN_MENU)
@@ -672,6 +709,68 @@ async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
             except Exception as e:
                 await send_safe(uid, bot, f"❌ {group}: {str(e)[:50]}")
         await send_safe(uid, bot, f"✅ Отправлено: {success}/{len(valid_groups)}", MAIN_MENU)
+
+# ==================== ИСПРАВЛЕННАЯ БЕСКОНЕЧНАЯ РАССЫЛКА 24/7 ====================
+async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min, random_max):
+    sent = user_data[uid]['broadcasts'][bid].get('sent', 0)
+    print(f"[START] Бесконечная рассылка #{bid+1} для {uid} запущена")
+    
+    try:
+        while True:
+            # Проверка на остановку через флаг
+            if not user_data[uid]['broadcasts'][bid].get('active', True):
+                print(f"[STOP] Рассылка #{bid+1} для {uid} остановлена по флагу")
+                break
+            
+            for group in groups:
+                # Проверка на отмену задачи
+                task = asyncio.current_task()
+                if task and task.cancelled():
+                    print(f"[CANCEL] Рассылка #{bid+1} для {uid} отменена")
+                    break
+                
+                if not user_data[uid]['broadcasts'][bid].get('active', True):
+                    break
+                
+                try:
+                    await client.send_message(group, text)
+                    sent += 1
+                    
+                    if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
+                        user_data[uid]['broadcasts'][bid]['sent'] = sent
+                        user_data[uid]['total_sent'] = user_data[uid].get('total_sent', 0) + 1
+                        save_data()
+                    
+                    print(f"[SEND] {uid} -> рассылка #{bid+1} -> {group} (всего: {sent})")
+                except FloodWaitError as e:
+                    print(f"[FLOOD] {uid} ждёт {e.seconds} сек")
+                    await asyncio.sleep(e.seconds)
+                except asyncio.CancelledError:
+                    print(f"[CANCEL] Рассылка #{bid+1} для {uid} отменена во время отправки")
+                    break
+                except Exception as e:
+                    print(f"[ERROR] {uid} рассылка #{bid+1}: {e}")
+                    if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
+                        user_data[uid]['broadcasts'][bid]['errors'] = user_data[uid]['broadcasts'][bid].get('errors', 0) + 1
+                        user_data[uid]['total_errors'] = user_data[uid].get('total_errors', 0) + 1
+                        save_data()
+                
+                delay = interval
+                if random_min and random_max:
+                    delay = random.randint(random_min, random_max)
+                await asyncio.sleep(delay)
+            
+            # Если цикл завершил круг, проверяем активна ли рассылка
+            if not user_data[uid]['broadcasts'][bid].get('active', True):
+                break
+                
+    except asyncio.CancelledError:
+        print(f"[CANCEL] Бесконечная рассылка #{bid+1} для {uid} отменена. Отправлено: {sent}")
+    finally:
+        if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
+            user_data[uid]['broadcasts'][bid]['active'] = False
+            save_data()
+        print(f"[STOP] Бесконечная рассылка #{bid+1} для {uid} полностью остановлена. Отправлено: {sent}")
 
 # ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
 async def message_handler(update: Update, context):
@@ -974,6 +1073,7 @@ async def message_handler(update: Update, context):
             return
         
         bc['groups'] = valid_groups
+        bc['active'] = True
         save_data()
         
         if is_247:
@@ -983,8 +1083,6 @@ async def message_handler(update: Update, context):
             if task_key not in active_tasks or active_tasks[task_key].done():
                 task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
                 active_tasks[task_key] = task
-                bc['active'] = True
-                save_data()
         else:
             await send_safe(uid, context.bot, f"📤 <b>ОТПРАВКА РАЗОМ</b>\n\n📢 Рассылка #{bid+1}\n👥 Групп: {len(valid_groups)}", MAIN_MENU)
             success = 0
@@ -998,44 +1096,6 @@ async def message_handler(update: Update, context):
             await send_safe(uid, context.bot, f"✅ Отправлено: {success}/{len(valid_groups)}", MAIN_MENU)
         
         del user_states[uid]
-
-# ==================== БЕСКОНЕЧНАЯ РАССЫЛКА 24/7 ====================
-async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min, random_max):
-    sent = user_data[uid]['broadcasts'][bid].get('sent', 0)
-    print(f"[START] Бесконечная рассылка #{bid+1} для {uid} запущена")
-    
-    try:
-        while True:
-            for group in groups:
-                try:
-                    await client.send_message(group, text)
-                    sent += 1
-                    
-                    if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
-                        user_data[uid]['broadcasts'][bid]['sent'] = sent
-                        user_data[uid]['total_sent'] = user_data[uid].get('total_sent', 0) + 1
-                        save_data()
-                    
-                    print(f"[SEND] {uid} -> рассылка #{bid+1} -> {group} (всего: {sent})")
-                except FloodWaitError as e:
-                    print(f"[FLOOD] {uid} ждёт {e.seconds} сек")
-                    await asyncio.sleep(e.seconds)
-                except Exception as e:
-                    print(f"[ERROR] {uid} рассылка #{bid+1}: {e}")
-                    if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
-                        user_data[uid]['broadcasts'][bid]['errors'] = user_data[uid]['broadcasts'][bid].get('errors', 0) + 1
-                        user_data[uid]['total_errors'] = user_data[uid].get('total_errors', 0) + 1
-                        save_data()
-                
-                delay = interval
-                if random_min and random_max:
-                    delay = random.randint(random_min, random_max)
-                await asyncio.sleep(delay)
-    except asyncio.CancelledError:
-        if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
-            user_data[uid]['broadcasts'][bid]['active'] = False
-            save_data()
-        print(f"[STOP] Бесконечная рассылка #{bid+1} для {uid} остановлена. Отправлено: {sent}")
 
 # ==================== ЗАПУСК БОТА ====================
 def main():
@@ -1053,6 +1113,7 @@ def main():
     print("=" * 60)
     print("📌 МОЖНО ЗАПУСКАТЬ НЕСКОЛЬКО РАССЫЛОК ОДНОВРЕМЕННО")
     print("📌 КАЖДАЯ РАССЫЛКА ИМЕЕТ СВОЙ СТАТУС")
+    print("📌 ОСТАНОВКА РАССЫЛОК РАБОТАЕТ КОРРЕКТНО")
     print("=" * 60)
     
     app.run_polling()
