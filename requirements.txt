@@ -1,0 +1,4 @@
+telethon==1.36.0
+python-telegram-bot
+aiohttp
+flask
