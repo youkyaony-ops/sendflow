@@ -10,33 +10,29 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = '8135472813:AAHiugVNCzgRuIAxG4L_3MppCW0Is01VHH8'
+BOT_TOKEN = '7983828391:AAFKhi9Gqc2Mhi26n7662hYm6aDlOv0RYgU'
 ADMIN_ID = 6301912178
-API_ID = 39021931
-API_HASH = '55227d81fae655ad385381539f67bf90'
+API_ID = 31245848
+API_HASH = '67336528977585e1457985dc1d0ceefb'
 
-# Файл для сохранения данных
 DATA_FILE = 'user_data.json'
 
 user_data = {}
 active_tasks = {}
 temp_sessions = {}
 
-# Загрузка данных из файла
 def load_data():
     global user_data
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
-                # Конвертируем ключи обратно в int
                 user_data = {int(k): v for k, v in loaded.items()}
                 logger.info(f"Загружены данные для {len(user_data)} пользователей")
         except Exception as e:
             logger.error(f"Ошибка загрузки: {e}")
             user_data = {}
 
-# Сохранение данных в файл
 def save_data():
     try:
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -64,19 +60,20 @@ async def show_main_menu(chat_id, bot, text=None):
 
 async def start(update: Update, context):
     uid = update.effective_user.id
-    if uid != ADMIN_ID:
-        await update.message.reply_text("❌ Нет доступа")
-        return
+    username = update.effective_user.username or update.effective_user.first_name
     
-    # Загружаем последние данные
+    # ЗАГЛУШКА - теперь доступно ВСЕМ
+    # if uid != ADMIN_ID:
+    #     await update.message.reply_text("❌ Нет доступа")
+    #     return
+    
     load_data()
     
     if uid not in user_data:
         user_data[uid] = {}
         save_data()
     
-    # Показываем текущие настройки
-    status_text = "📊 ТВОИ НАСТРОЙКИ:\n"
+    status_text = f"👋 Привет, {username}!\n\n📊 ТВОИ НАСТРОЙКИ:\n"
     if user_data[uid].get('text'):
         status_text += f"✅ Текст: {user_data[uid]['text'][:50]}...\n"
     else:
@@ -99,9 +96,10 @@ async def button_callback(update: Update, context):
     await query.answer()
     uid = query.from_user.id
     
-    if uid != ADMIN_ID:
-        await query.edit_message_text("❌ Нет доступа", reply_markup=MAIN_KEYBOARD)
-        return
+    # ЗАГЛУШКА - теперь доступно ВСЕМ
+    # if uid != ADMIN_ID:
+    #     await query.edit_message_text("❌ Нет доступа", reply_markup=MAIN_KEYBOARD)
+    #     return
     
     data = query.data
     
@@ -120,20 +118,19 @@ async def button_callback(update: Update, context):
         user_data[uid] = user_data.get(uid, {})
         user_data[uid]['step'] = 'groups'
         save_data()
-        await context.bot.send_message(uid, "🔗 Введи ссылки на группы через запятую\nПример: @group1, @group2")
+        await context.bot.send_message(uid, "🔗 Введи ссылки на группы через запятую\nПример: @group1, @group2, https://t.me/group3")
     
     elif data == 'set_interval':
         user_data[uid] = user_data.get(uid, {})
         user_data[uid]['step'] = 'interval'
         save_data()
-        await context.bot.send_message(uid, "⏱ Введи интервал в секундах (5-120):")
+        await context.bot.send_message(uid, "⏱ Введи интервал в секундах (5-120):\nРекомендуем 30-60")
     
     elif data == 'start_broadcast':
         if uid not in user_data:
             user_data[uid] = {}
             save_data()
         
-        # ПРЯМАЯ ПРОВЕРКА - читаем из словаря
         has_text = user_data[uid].get('text') is not None and user_data[uid]['text'] != ''
         has_groups = user_data[uid].get('groups') is not None and len(user_data[uid]['groups']) > 0
         has_interval = user_data[uid].get('interval') is not None
@@ -141,13 +138,10 @@ async def button_callback(update: Update, context):
         missing = []
         if not has_text:
             missing.append("текст")
-            logger.warning(f"Пользователь {uid}: нет текста")
         if not has_groups:
             missing.append("группы")
-            logger.warning(f"Пользователь {uid}: нет групп")
         if not has_interval:
             missing.append("интервал")
-            logger.warning(f"Пользователь {uid}: нет интервала")
         
         if missing:
             await context.bot.send_message(
@@ -163,12 +157,12 @@ async def button_callback(update: Update, context):
             return
         
         if uid in active_tasks and not active_tasks[uid].done():
-            await context.bot.send_message(uid, "⚠️ РАССЫЛКА УЖЕ ЗАПУЩЕНА!", reply_markup=MAIN_KEYBOARD)
+            await context.bot.send_message(uid, "⚠️ РАССЫЛКА УЖЕ ЗАПУЩЕНА!\nНажми ОСТАНОВИТЬ", reply_markup=MAIN_KEYBOARD)
             return
         
         user_data[uid]['step'] = 'phone'
         save_data()
-        await context.bot.send_message(uid, "🔐 Введи номер телефона с +\nПример: +77081234567")
+        await context.bot.send_message(uid, "🔐 АВТОРИЗАЦИЯ TELEGRAM\n\nВведи номер телефона с +\nПример: +77081234567")
     
     elif data == 'stop_broadcast':
         if uid in active_tasks and not active_tasks[uid].done():
@@ -222,8 +216,6 @@ async def button_callback(update: Update, context):
 
 async def handle_message(update: Update, context):
     uid = update.effective_user.id
-    if uid != ADMIN_ID:
-        return
     
     if not update.message or not update.message.text:
         return
@@ -234,7 +226,6 @@ async def handle_message(update: Update, context):
         user_data[uid] = {}
         save_data()
     
-    # Если нет активного шага - показываем меню
     if 'step' not in user_data[uid]:
         await show_main_menu(uid, context.bot)
         return
@@ -248,7 +239,6 @@ async def handle_message(update: Update, context):
         user_data[uid]['text'] = text
         user_data[uid].pop('step')
         save_data()
-        logger.info(f"Сохранён текст для {uid}: {text[:50]}...")
         await show_main_menu(uid, context.bot, f"✅ Текст сохранён!")
     
     elif step == 'groups':
@@ -267,7 +257,6 @@ async def handle_message(update: Update, context):
         user_data[uid]['groups'] = groups
         user_data[uid].pop('step')
         save_data()
-        logger.info(f"Сохранены группы для {uid}: {len(groups)} шт")
         await show_main_menu(uid, context.bot, f"✅ Сохранено групп: {len(groups)}")
     
     elif step == 'interval':
@@ -277,7 +266,6 @@ async def handle_message(update: Update, context):
                 user_data[uid]['interval'] = interval
                 user_data[uid].pop('step')
                 save_data()
-                logger.info(f"Сохранён интервал для {uid}: {interval}")
                 await show_main_menu(uid, context.bot, f"✅ Интервал {interval} сек")
             else:
                 await update.message.reply_text("❌ Число от 5 до 120\nПопробуй снова:")
@@ -308,7 +296,7 @@ async def handle_message(update: Update, context):
             if not await client.is_user_authorized():
                 await client.send_code_request(text)
             temp_sessions[uid] = client
-            await update.message.reply_text("📲 Введи код в формате: code12345")
+            await update.message.reply_text("📲 КОД ОТПРАВЛЕН\n\nВведи код в формате: code12345")
         except Exception as e:
             await update.message.reply_text(f"❌ Ошибка: {str(e)[:100]}")
             user_data[uid].pop('step')
@@ -326,14 +314,14 @@ async def handle_message(update: Update, context):
         user_data[uid]['code'] = code
         user_data[uid]['step'] = 'password'
         save_data()
-        await update.message.reply_text("🔐 Пароль 2FA (если есть) или /skip")
+        await update.message.reply_text("🔐 Если есть двухфакторная аутентификация - введи пароль\nЕсли нет - отправь /skip")
     
     elif step == 'password':
         password = None if text == '/skip' else text
         
         client = temp_sessions.get(uid)
         if not client:
-            await update.message.reply_text("❌ Сессия потеряна")
+            await update.message.reply_text("❌ Сессия потеряна. Начни заново /start")
             await show_main_menu(uid, context.bot)
             return
         
@@ -351,18 +339,18 @@ async def handle_message(update: Update, context):
                     await update.message.reply_text("❌ Неверный пароль")
                     return
             
-            await update.message.reply_text("🔍 Проверяю группы...")
+            await update.message.reply_text("🔍 Проверяю доступ к группам...")
             valid_groups = []
             
             for group in groups:
                 try:
                     await client.get_entity(group)
                     valid_groups.append(group)
-                except:
-                    await update.message.reply_text(f"⚠️ {group} - недоступна")
+                except Exception as e:
+                    await update.message.reply_text(f"⚠️ {group} - недоступна: {str(e)[:50]}")
             
             if not valid_groups:
-                await update.message.reply_text("❌ Нет доступных групп!")
+                await update.message.reply_text("❌ Нет доступных групп для рассылки!")
                 await show_main_menu(uid, context.bot)
                 return
             
@@ -370,9 +358,10 @@ async def handle_message(update: Update, context):
             save_data()
             
             await update.message.reply_text(
-                f"✅ ЗАПУСКАЮ РАССЫЛКУ\n"
-                f"Групп: {len(valid_groups)}\n"
-                f"Интервал: {interval} сек\n\n"
+                f"✅ АВТОРИЗАЦИЯ УСПЕШНА!\n\n"
+                f"🚀 ЗАПУСКАЮ РАССЫЛКУ\n"
+                f"📊 Групп: {len(valid_groups)}\n"
+                f"⏱ Интервал: {interval} сек\n\n"
                 f"Для остановки нажми кнопку ОСТАНОВИТЬ",
                 reply_markup=MAIN_KEYBOARD
             )
@@ -382,6 +371,17 @@ async def handle_message(update: Update, context):
             user_data[uid].pop('step', None)
             save_data()
             
+        except errors.FloodWaitError as e:
+            await update.message.reply_text(f"❌ Флуд ожидание: {e.seconds} секунд")
+            await show_main_menu(uid, context.bot)
+        except errors.SessionPasswordNeededError:
+            if not password:
+                await update.message.reply_text("🔐 Требуется пароль 2FA. Введи пароль:")
+                return
+        except errors.PhoneCodeInvalidError:
+            await update.message.reply_text("❌ Неверный код подтверждения")
+            user_data[uid]['step'] = 'code'
+            save_data()
         except Exception as e:
             await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
             await show_main_menu(uid, context.bot)
@@ -396,15 +396,22 @@ async def run_broadcast(uid, bot, client, groups, text, interval):
                 current = idx
                 try:
                     await client.send_message(group, text)
-                    logger.info(f"[+] {uid} -> {group}")
-                    if idx % 10 == 0:
-                        await bot.send_message(uid, f"📨 {idx}/{total}", reply_markup=MAIN_KEYBOARD)
+                    logger.info(f"[+] {uid} -> {group} ({idx}/{total})")
+                    
+                    if idx % 5 == 0 or idx == total:
+                        await bot.send_message(uid, f"📨 Прогресс: {idx}/{total}\nПоследняя: {group}", reply_markup=MAIN_KEYBOARD)
+                except errors.FloodWaitError as e:
+                    await bot.send_message(uid, f"⚠️ Флуд: жди {e.seconds}с")
+                    await asyncio.sleep(e.seconds)
                 except Exception as e:
-                    await bot.send_message(uid, f"❌ {group}: {str(e)[:50]}")
+                    await bot.send_message(uid, f"❌ Ошибка {group}: {str(e)[:50]}")
+                
                 await asyncio.sleep(interval)
-            await bot.send_message(uid, f"🔄 Круг завершён", reply_markup=MAIN_KEYBOARD)
+            
+            await bot.send_message(uid, f"🔄 Круг по {total} группам завершён. Начинаю новый...", reply_markup=MAIN_KEYBOARD)
+    
     except asyncio.CancelledError:
-        await bot.send_message(uid, f"🛑 Остановлено. Отправлено: {current}/{total}", reply_markup=MAIN_KEYBOARD)
+        await bot.send_message(uid, f"🛑 Рассылка остановлена. Отправлено: {current}/{total}", reply_markup=MAIN_KEYBOARD)
     finally:
         if uid in temp_sessions:
             try:
@@ -412,22 +419,23 @@ async def run_broadcast(uid, bot, client, groups, text, interval):
             except:
                 pass
             temp_sessions.pop(uid, None)
-        active_tasks.pop(uid, None)
+        if uid in active_tasks:
+            active_tasks.pop(uid, None)
 
 async def skip_command(update: Update, context):
     uid = update.effective_user.id
-    if uid == ADMIN_ID and uid in user_data and user_data[uid].get('step') == 'password':
+    if uid in user_data and user_data[uid].get('step') == 'password':
         await handle_message(update, context)
 
 def main():
-    load_data()  # Загружаем данные при старте
+    load_data()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("skip", skip_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ SendFlow запущен")
+    print("✅ SendFlow запущен - ДОСТУПЕН ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ")
     print(f"📁 Данные сохраняются в {DATA_FILE}")
     app.run_polling()
 
