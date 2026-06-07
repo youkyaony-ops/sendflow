@@ -11,6 +11,7 @@ from telethon import TelegramClient, errors
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from aiohttp import web
 
 # ==================== НАСТРОЙКА ====================
 logging.basicConfig(level=logging.ERROR)
@@ -22,6 +23,10 @@ API_HASH = '67336528977585e1457985dc1d0ceefb'
 DATA_FILE = 'user_data.json'
 BACKUP_FILE = 'user_data_backup.json'
 SESSIONS_DIR = 'telegram_sessions'
+
+# Настройки для Render
+PORT = int(os.environ.get('PORT', 8080))
+RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://sendflow-12.onrender.com')
 
 if not os.path.exists(SESSIONS_DIR):
     os.makedirs(SESSIONS_DIR)
@@ -492,7 +497,6 @@ async def button_handler(update: Update, context):
         user_states[uid] = {'step': 'send_once', 'bid': bid}
         await send_safe(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789\n\n(Сессия сохранится на 30 дней)", CANCEL_BTN)
     
-    # ===== ИСПРАВЛЕННАЯ ОСТАНОВКА РАССЫЛКИ =====
     elif data.startswith('stop_broadcast_'):
         bid = int(data.split('_')[2])
         task_key = f"{uid}_{bid}"
@@ -510,7 +514,6 @@ async def button_handler(update: Update, context):
                 if task_key in active_tasks:
                     del active_tasks[task_key]
                 
-                # Закрываем клиента если нет других активных рассылок
                 if uid in sessions:
                     other_tasks = [k for k in active_tasks.keys() if k.startswith(f"{uid}_")]
                     if not other_tasks:
@@ -710,20 +713,18 @@ async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
                 await send_safe(uid, bot, f"❌ {group}: {str(e)[:50]}")
         await send_safe(uid, bot, f"✅ Отправлено: {success}/{len(valid_groups)}", MAIN_MENU)
 
-# ==================== ИСПРАВЛЕННАЯ БЕСКОНЕЧНАЯ РАССЫЛКА 24/7 ====================
+# ==================== БЕСКОНЕЧНАЯ РАССЫЛКА 24/7 ====================
 async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min, random_max):
     sent = user_data[uid]['broadcasts'][bid].get('sent', 0)
     print(f"[START] Бесконечная рассылка #{bid+1} для {uid} запущена")
     
     try:
         while True:
-            # Проверка на остановку через флаг
             if not user_data[uid]['broadcasts'][bid].get('active', True):
                 print(f"[STOP] Рассылка #{bid+1} для {uid} остановлена по флагу")
                 break
             
             for group in groups:
-                # Проверка на отмену задачи
                 task = asyncio.current_task()
                 if task and task.cancelled():
                     print(f"[CANCEL] Рассылка #{bid+1} для {uid} отменена")
@@ -760,7 +761,6 @@ async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min
                     delay = random.randint(random_min, random_max)
                 await asyncio.sleep(delay)
             
-            # Если цикл завершил круг, проверяем активна ли рассылка
             if not user_data[uid]['broadcasts'][bid].get('active', True):
                 break
                 
@@ -786,7 +786,6 @@ async def message_handler(update: Update, context):
         await main_menu(uid, context.bot)
         return
     
-    # НАСТРОЙКА ИНТЕРВАЛА ПО УМОЛЧАНИЮ
     if step == 'def_interval':
         try:
             val = int(text)
@@ -802,7 +801,6 @@ async def message_handler(update: Update, context):
             return
         del user_states[uid]
     
-    # ДОБАВЛЕНИЕ ГРУППЫ
     elif step == 'add_group':
         group = text.replace('https://t.me/', '@').replace('http://t.me/', '@').replace('t.me/', '@')
         if not group.startswith('@'):
@@ -817,7 +815,6 @@ async def message_handler(update: Update, context):
             await send_safe(uid, context.bot, f"⚠️ Группа {group} уже есть", GROUPS_MENU)
         del user_states[uid]
     
-    # РЕДАКТИРОВАНИЕ ТЕКСТА
     elif step == 'edit_text':
         bid = step_data['bid']
         if len(text) > 4096:
@@ -835,7 +832,6 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
-    # РЕДАКТИРОВАНИЕ ГРУПП
     elif step == 'edit_groups':
         bid = step_data['bid']
         raw = [g.strip() for g in text.split(',') if g.strip()]
@@ -861,7 +857,6 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
-    # РЕДАКТИРОВАНИЕ ИНТЕРВАЛА
     elif step == 'edit_interval':
         bid = step_data['bid']
         try:
@@ -884,7 +879,6 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
-    # РЕДАКТИРОВАНИЕ РАНДОМА
     elif step == 'edit_random':
         bid = step_data['bid']
         if text == '0':
@@ -924,7 +918,6 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
-    # РЕДАКТИРОВАНИЕ РАСПИСАНИЯ
     elif step == 'edit_schedule':
         bid = step_data['bid']
         if text.lower() == 'off':
@@ -962,7 +955,6 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
-    # АВТОРИЗАЦИЯ И ЗАПУСК
     elif step in ['start_247', 'send_once']:
         bid = step_data['bid']
         is_247 = (step == 'start_247')
@@ -1045,7 +1037,6 @@ async def message_handler(update: Update, context):
             del user_states[uid]
             return
         
-        # Сохраняем информацию о сессии
         if uid not in user_data:
             save_user(uid)
         if 'sessions' not in user_data[uid]:
@@ -1058,7 +1049,6 @@ async def message_handler(update: Update, context):
         }
         save_data()
         
-        # Проверка групп
         valid_groups = []
         for group in groups:
             try:
@@ -1097,26 +1087,78 @@ async def message_handler(update: Update, context):
         
         del user_states[uid]
 
+# ==================== HTTP СЕРВЕР ДЛЯ RENDER (ЧИНИМ LIVE) ====================
+async def health_check(request):
+    """Health check endpoint для Render и cron-job.org"""
+    return web.Response(text="OK", status=200, headers={'Content-Type': 'text/plain'})
+
+async def handle_webhook(request):
+    """Обработка webhook от Telegram"""
+    try:
+        data = await request.json()
+        update = Update.de_json(data, bot_app.bot)
+        await bot_app.process_update(update)
+        return web.Response(text="OK", status=200)
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        return web.Response(text="ERROR", status=500)
+
+async def start_http_server():
+    """Запускает HTTP сервер для Render (держит бота живым)"""
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/ping', health_check)
+    app.router.add_get('/', health_check)
+    app.router.add_post(f'/webhook/{BOT_TOKEN}', handle_webhook)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    print(f"[HTTP] Сервер запущен на порту {PORT}")
+    print(f"[HTTP] Health check: {RENDER_URL}/health")
+    print(f"[HTTP] Webhook: {RENDER_URL}/webhook/{BOT_TOKEN}")
+    
+    # Бесконечное ожидание
+    await asyncio.Event().wait()
+
 # ==================== ЗАПУСК БОТА ====================
-def main():
+async def run_bot():
+    global bot_app
     load_data()
     
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Создаём приложение бота
+    bot_app = Application.builder().token(BOT_TOKEN).build()
     
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("skip", skip_cmd))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    # Добавляем обработчики
+    bot_app.add_handler(CommandHandler("start", start_cmd))
+    bot_app.add_handler(CommandHandler("skip", skip_cmd))
+    bot_app.add_handler(CallbackQueryHandler(button_handler))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    
+    # Инициализируем бота
+    await bot_app.initialize()
+    await bot_app.start()
+    
+    # Устанавливаем webhook (чтобы бот получал обновления через HTTP, а не polling)
+    webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+    await bot_app.bot.set_webhook(webhook_url)
+    print(f"[WEBHOOK] Установлен: {webhook_url}")
     
     print("=" * 60)
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
+    print(f"🌐 WEBHOOK MODE: {webhook_url}")
+    print(f"❤️ HEALTH CHECK: {RENDER_URL}/health")
     print("=" * 60)
-    print("📌 МОЖНО ЗАПУСКАТЬ НЕСКОЛЬКО РАССЫЛОК ОДНОВРЕМЕННО")
-    print("📌 КАЖДАЯ РАССЫЛКА ИМЕЕТ СВОЙ СТАТУС")
-    print("📌 ОСТАНОВКА РАССЫЛОК РАБОТАЕТ КОРРЕКТНО")
+    print("📌 БОТ ТЕПЕРЬ ВСЕГДА LIVE НА RENDER")
+    print("📌 НЕ ЗАСЫПАЕТ БЛАГОДАРЯ WEBHOOK + HTTP SERVER")
     print("=" * 60)
     
-    app.run_polling()
+    # Запускаем HTTP сервер (держит бота живым)
+    await start_http_server()
+
+def main():
+    asyncio.run(run_bot())
 
 if __name__ == '__main__':
     main()
