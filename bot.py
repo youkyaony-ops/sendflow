@@ -146,8 +146,10 @@ MAIN_MENU = InlineKeyboardMarkup([
 def get_broadcast_actions(bid):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 ТЕКСТ", callback_data=f'edit_text_{bid}'), InlineKeyboardButton("👥 ГРУППЫ", callback_data=f'edit_groups_{bid}')],
+        [InlineKeyboardButton("📷 ФОТО", callback_data=f'edit_photo_{bid}'), InlineKeyboardButton("🎥 ВИДЕО", callback_data=f'edit_video_{bid}')],
         [InlineKeyboardButton("⏱ ИНТЕРВАЛ", callback_data=f'edit_interval_{bid}'), InlineKeyboardButton("🎲 РАНДОМ", callback_data=f'edit_random_{bid}')],
         [InlineKeyboardButton("🔄 ЗАЦИКЛИТЬ", callback_data=f'toggle_loop_{bid}'), InlineKeyboardButton("📅 РАСПИСАНИЕ", callback_data=f'edit_schedule_{bid}')],
+        [InlineKeyboardButton("🖼️ ПРЕВЬЮ", callback_data=f'preview_{bid}'), InlineKeyboardButton("🗑 ОЧИСТИТЬ МЕДИА", callback_data=f'clear_media_{bid}')],
         [InlineKeyboardButton("🚀 ЗАПУСТИТЬ 24/7", callback_data=f'start_247_{bid}'), InlineKeyboardButton("▶️ ОТПРАВИТЬ РАЗОМ", callback_data=f'send_once_{bid}')],
         [InlineKeyboardButton("⏹️ ОСТАНОВИТЬ", callback_data=f'stop_broadcast_{bid}'), InlineKeyboardButton("📊 СТАТУС", callback_data=f'bc_status_{bid}')],
         [InlineKeyboardButton("📎 КЛОНИРОВАТЬ", callback_data=f'clone_broadcast_{bid}'), InlineKeyboardButton("🗑 УДАЛИТЬ", callback_data=f'delete_broadcast_{bid}')],
@@ -209,13 +211,22 @@ async def show_broadcast_menu(uid, bot, bid):
     is_running = task_key in active_tasks and not active_tasks[task_key].done()
     
     status = "🟢 АКТИВНА" if is_running else "🔴 ОСТАНОВЛЕНА"
+    
+    # Информация о медиа
+    media_info = ""
+    if bc.get('media_type') == 'photo':
+        media_info = "\n📷 <b>Фото:</b> есть"
+    elif bc.get('media_type') == 'video':
+        media_info = "\n🎥 <b>Видео:</b> есть"
+    
     txt = f"📢 <b>{bc.get('name', f'Рассылка {bid+1}')}</b>\n\n"
     txt += f"Статус: {status}\n"
     txt += f"📝 Текст: {'✅' if bc.get('text') else '❌'}\n"
     if bc.get('text'):
         preview = bc['text'][:50] + '...' if len(bc['text']) > 50 else bc['text']
         txt += f"   → {preview}\n"
-    txt += f"👥 Групп: {len(bc.get('groups', []))}\n"
+    txt += media_info
+    txt += f"\n👥 Групп: {len(bc.get('groups', []))}\n"
     if bc.get('groups'):
         txt += f"   → {', '.join(bc['groups'][:3])}\n"
     txt += f"⏱ Интервал: {bc.get('interval', 30)} сек\n"
@@ -308,7 +319,10 @@ async def button_handler(update: Update, context):
             'sent': 0,
             'errors': 0,
             'schedule': None,
-            'created_at': str(datetime.now())
+            'created_at': str(datetime.now()),
+            'media_type': None,
+            'media_file_id': None,
+            'media_caption': None
         }
         user_data[uid]['broadcasts'].append(new_broadcast)
         save_data()
@@ -369,11 +383,11 @@ async def button_handler(update: Update, context):
     
     # ===== ПОМОЩЬ =====
     elif data == 'help_quick':
-        txt = "🚀 <b>БЫСТРЫЙ СТАРТ</b>\n\n1️⃣ Нажми '➕ НОВАЯ РАССЫЛКА'\n2️⃣ Настрой текст и группы\n3️⃣ Нажми '🚀 ЗАПУСТИТЬ 24/7'\n4️⃣ Введи номер телефона (один раз)\n5️⃣ Введи код из Telegram\n\n✅ Готово! Рассылка работает 24/7"
+        txt = "🚀 <b>БЫСТРЫЙ СТАРТ</b>\n\n1️⃣ Нажми '➕ НОВАЯ РАССЫЛКА'\n2️⃣ Настрой текст и группы\n3️⃣ Добавь фото или видео\n4️⃣ Нажми '🚀 ЗАПУСТИТЬ 24/7'\n5️⃣ Введи номер телефона (один раз)\n\n✅ Готово! Рассылка работает 24/7"
         await send_safe(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_create':
-        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>Текст:</b> любое сообщение, до 4096 символов\n<b>Группы:</b> через запятую: @group1, @group2\n<b>Интервал:</b> время между сообщениями (5-300 сек)\n<b>Рандом:</b> случайная задержка\n<b>Зациклить:</b> бесконечный повтор\n\n💡 Бот должен быть участником всех групп!"
+        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>Текст:</b> любое сообщение, до 4096 символов\n<b>Фото/Видео:</b> отправь медиа с подписью\n<b>Группы:</b> через запятую: @group1, @group2\n<b>Интервал:</b> время между сообщениями (5-300 сек)\n\n💡 Бот должен быть участником всех групп!"
         await send_safe(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_errors':
@@ -389,7 +403,45 @@ async def button_handler(update: Update, context):
     elif data.startswith('edit_text_'):
         bid = int(data.split('_')[2])
         user_states[uid] = {'step': 'edit_text', 'bid': bid}
-        await send_safe(uid, context.bot, "📝 Введите текст рассылки:", CANCEL_BTN)
+        await send_safe(uid, context.bot, "📝 Введите текст рассылки (можно с эмодзи):", CANCEL_BTN)
+    
+    elif data.startswith('edit_photo_'):
+        bid = int(data.split('_')[2])
+        user_states[uid] = {'step': 'edit_photo', 'bid': bid}
+        await send_safe(uid, context.bot, "📷 Отправьте ФОТО для рассылки\n\nМожно добавить подпись - она станет текстом сообщения", CANCEL_BTN)
+    
+    elif data.startswith('edit_video_'):
+        bid = int(data.split('_')[2])
+        user_states[uid] = {'step': 'edit_video', 'bid': bid}
+        await send_safe(uid, context.bot, "🎥 Отправьте ВИДЕО для рассылки\n\nМожно добавить подпись - она станет текстом сообщения", CANCEL_BTN)
+    
+    elif data.startswith('clear_media_'):
+        bid = int(data.split('_')[2])
+        user_data[uid]['broadcasts'][bid]['media_type'] = None
+        user_data[uid]['broadcasts'][bid]['media_file_id'] = None
+        user_data[uid]['broadcasts'][bid]['media_caption'] = None
+        save_data()
+        await send_safe(uid, context.bot, "✅ Медиа очищено")
+        await show_broadcast_menu(uid, context.bot, bid)
+    
+    elif data.startswith('preview_'):
+        bid = int(data.split('_')[2])
+        bc = user_data[uid]['broadcasts'][bid]
+        
+        if not bc.get('text') and not bc.get('media_file_id'):
+            await send_safe(uid, context.bot, "❌ Нет текста или медиа для предпросмотра")
+            return
+        
+        preview_text = "📋 <b>ПРЕДПРОСМОТР</b>\n\n"
+        if bc.get('text'):
+            preview_text += f"📝 <b>Текст:</b>\n{bc['text'][:300]}\n\n"
+        if bc.get('media_type') == 'photo':
+            preview_text += "📷 <b>Фото:</b> есть\n"
+        elif bc.get('media_type') == 'video':
+            preview_text += "🎥 <b>Видео:</b> есть\n"
+        
+        await send_safe(uid, context.bot, preview_text)
+        await show_broadcast_menu(uid, context.bot, bid)
     
     elif data.startswith('edit_groups_'):
         bid = int(data.split('_')[2])
@@ -451,8 +503,8 @@ async def button_handler(update: Update, context):
         bid = int(data.split('_')[2])
         bc = user_data[uid]['broadcasts'][bid]
         
-        if not bc.get('text'):
-            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ рассылки!")
+        if not bc.get('text') and not bc.get('media_file_id'):
+            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ или МЕДИА для рассылки!")
             await show_broadcast_menu(uid, context.bot, bid)
             return
         if not bc.get('groups'):
@@ -479,8 +531,8 @@ async def button_handler(update: Update, context):
         bid = int(data.split('_')[2])
         bc = user_data[uid]['broadcasts'][bid]
         
-        if not bc.get('text'):
-            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ рассылки!")
+        if not bc.get('text') and not bc.get('media_file_id'):
+            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ или МЕДИА для рассылки!")
             await show_broadcast_menu(uid, context.bot, bid)
             return
         if not bc.get('groups'):
@@ -569,7 +621,10 @@ async def button_handler(update: Update, context):
             'sent': 0,
             'errors': 0,
             'schedule': original.get('schedule'),
-            'created_at': str(datetime.now())
+            'created_at': str(datetime.now()),
+            'media_type': original.get('media_type'),
+            'media_file_id': original.get('media_file_id'),
+            'media_caption': original.get('media_caption')
         }
         user_data[uid]['broadcasts'].append(new_bc)
         save_data()
@@ -670,11 +725,15 @@ async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
     
     bc = user_data[uid]['broadcasts'][bid]
     groups = bc.get('groups', [])
-    msg = bc.get('text', '')
+    text = bc.get('text', '')
     interval = bc.get('interval', 30)
     random_min = bc.get('random_min', 0)
     random_max = bc.get('random_max', 0)
+    media_type = bc.get('media_type')
+    media_file_id = bc.get('media_file_id')
+    media_caption = bc.get('media_caption', text)
     
+    # Проверка групп
     valid_groups = []
     for group in groups:
         try:
@@ -691,30 +750,45 @@ async def start_broadcast_with_client(uid, bot, bid, client, is_247=True):
     bc['active'] = True
     save_data()
     
+    media_info = ""
+    if media_type == 'photo':
+        media_info = "\n📷 С ФОТО"
+    elif media_type == 'video':
+        media_info = "\n🎥 С ВИДЕО"
+    
     if is_247:
-        await send_safe(uid, bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📢 Рассылка #{bid+1}\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}", MAIN_MENU)
+        await send_safe(uid, bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📢 Рассылка #{bid+1}\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек{media_info}\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}", MAIN_MENU)
         
         task_key = f"{uid}_{bid}"
         if task_key not in active_tasks or active_tasks[task_key].done():
-            task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
+            task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, text, interval, random_min, random_max, media_type, media_file_id, media_caption))
             active_tasks[task_key] = task
             print(f"[START] Запущена рассылка #{bid+1} для пользователя {uid}")
         else:
             await send_safe(uid, bot, f"⚠️ Рассылка #{bid+1} уже запущена!", MAIN_MENU)
     else:
-        await send_safe(uid, bot, f"📤 <b>ОТПРАВКА РАЗОМ</b>\n\n📢 Рассылка #{bid+1}\n👥 Групп: {len(valid_groups)}", MAIN_MENU)
+        await send_safe(uid, bot, f"📤 <b>ОТПРАВКА РАЗОМ</b>\n\n📢 Рассылка #{bid+1}\n👥 Групп: {len(valid_groups)}{media_info}", MAIN_MENU)
         success = 0
         for group in valid_groups:
             try:
-                await client.send_message(group, msg)
+                await send_message_with_media(client, group, text, media_type, media_file_id, media_caption)
                 success += 1
                 await asyncio.sleep(2)
             except Exception as e:
                 await send_safe(uid, bot, f"❌ {group}: {str(e)[:50]}")
         await send_safe(uid, bot, f"✅ Отправлено: {success}/{len(valid_groups)}", MAIN_MENU)
 
+async def send_message_with_media(client, group, text, media_type, media_file_id, caption):
+    """Отправка сообщения с медиа если есть"""
+    if media_type == 'photo' and media_file_id:
+        await client.send_file(group, media_file_id, caption=caption or text)
+    elif media_type == 'video' and media_file_id:
+        await client.send_file(group, media_file_id, caption=caption or text)
+    else:
+        await client.send_message(group, text)
+
 # ==================== БЕСКОНЕЧНАЯ РАССЫЛКА 24/7 ====================
-async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min, random_max):
+async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min, random_max, media_type=None, media_file_id=None, media_caption=None):
     sent = user_data[uid]['broadcasts'][bid].get('sent', 0)
     print(f"[START] Бесконечная рассылка #{bid+1} для {uid} запущена")
     
@@ -734,7 +808,14 @@ async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min
                     break
                 
                 try:
-                    await client.send_message(group, text)
+                    # Отправка с медиа если есть
+                    if media_type == 'photo' and media_file_id:
+                        await client.send_file(group, media_file_id, caption=media_caption or text)
+                    elif media_type == 'video' and media_file_id:
+                        await client.send_file(group, media_file_id, caption=media_caption or text)
+                    else:
+                        await client.send_message(group, text)
+                    
                     sent += 1
                     
                     if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
@@ -775,7 +856,6 @@ async def run_broadcast_247(uid, bid, client, groups, text, interval, random_min
 # ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
 async def message_handler(update: Update, context):
     uid = update.effective_user.id
-    text = update.message.text.strip()
     
     save_user(uid)
     
@@ -786,7 +866,11 @@ async def message_handler(update: Update, context):
         await main_menu(uid, context.bot)
         return
     
+    # НАСТРОЙКА ИНТЕРВАЛА ПО УМОЛЧАНИЮ
     if step == 'def_interval':
+        if not update.message.text:
+            return
+        text = update.message.text.strip()
         try:
             val = int(text)
             if 5 <= val <= 300:
@@ -801,7 +885,11 @@ async def message_handler(update: Update, context):
             return
         del user_states[uid]
     
+    # ДОБАВЛЕНИЕ ГРУППЫ
     elif step == 'add_group':
+        if not update.message.text:
+            return
+        text = update.message.text.strip()
         group = text.replace('https://t.me/', '@').replace('http://t.me/', '@').replace('t.me/', '@')
         if not group.startswith('@'):
             group = '@' + group
@@ -815,8 +903,13 @@ async def message_handler(update: Update, context):
             await send_safe(uid, context.bot, f"⚠️ Группа {group} уже есть", GROUPS_MENU)
         del user_states[uid]
     
+    # РЕДАКТИРОВАНИЕ ТЕКСТА
     elif step == 'edit_text':
+        if not update.message.text:
+            return
         bid = step_data['bid']
+        text = update.message.text.strip()
+        
         if len(text) > 4096:
             await send_safe(uid, context.bot, "❌ Текст слишком длинный (макс 4096 символов)", CANCEL_BTN)
             return
@@ -832,8 +925,48 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
-    elif step == 'edit_groups':
+    # РЕДАКТИРОВАНИЕ ФОТО
+    elif step == 'edit_photo':
         bid = step_data['bid']
+        
+        if update.message.photo:
+            file_id = update.message.photo[-1].file_id
+            user_data[uid]['broadcasts'][bid]['media_type'] = 'photo'
+            user_data[uid]['broadcasts'][bid]['media_file_id'] = file_id
+            user_data[uid]['broadcasts'][bid]['media_caption'] = update.message.caption
+            save_data()
+            await send_safe(uid, context.bot, "✅ Фото добавлено к рассылке!")
+        else:
+            await send_safe(uid, context.bot, "❌ Отправьте ФОТО", CANCEL_BTN)
+            return
+        
+        del user_states[uid]
+        await show_broadcast_menu(uid, context.bot, bid)
+    
+    # РЕДАКТИРОВАНИЕ ВИДЕО
+    elif step == 'edit_video':
+        bid = step_data['bid']
+        
+        if update.message.video:
+            file_id = update.message.video.file_id
+            user_data[uid]['broadcasts'][bid]['media_type'] = 'video'
+            user_data[uid]['broadcasts'][bid]['media_file_id'] = file_id
+            user_data[uid]['broadcasts'][bid]['media_caption'] = update.message.caption
+            save_data()
+            await send_safe(uid, context.bot, "✅ Видео добавлено к рассылке!")
+        else:
+            await send_safe(uid, context.bot, "❌ Отправьте ВИДЕО", CANCEL_BTN)
+            return
+        
+        del user_states[uid]
+        await show_broadcast_menu(uid, context.bot, bid)
+    
+    # РЕДАКТИРОВАНИЕ ГРУПП
+    elif step == 'edit_groups':
+        if not update.message.text:
+            return
+        bid = step_data['bid']
+        text = update.message.text.strip()
         raw = [g.strip() for g in text.split(',') if g.strip()]
         groups = []
         for g in raw:
@@ -857,8 +990,12 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
+    # РЕДАКТИРОВАНИЕ ИНТЕРВАЛА
     elif step == 'edit_interval':
+        if not update.message.text:
+            return
         bid = step_data['bid']
+        text = update.message.text.strip()
         try:
             val = int(text)
             if 5 <= val <= 300:
@@ -879,8 +1016,12 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
+    # РЕДАКТИРОВАНИЕ РАНДОМА
     elif step == 'edit_random':
+        if not update.message.text:
+            return
         bid = step_data['bid']
+        text = update.message.text.strip()
         if text == '0':
             if bid >= len(user_data[uid].get('broadcasts', [])):
                 await send_safe(uid, context.bot, "❌ Рассылка не найдена", MAIN_MENU)
@@ -918,8 +1059,12 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
+    # РЕДАКТИРОВАНИЕ РАСПИСАНИЯ
     elif step == 'edit_schedule':
+        if not update.message.text:
+            return
         bid = step_data['bid']
+        text = update.message.text.strip()
         if text.lower() == 'off':
             if bid >= len(user_data[uid].get('broadcasts', [])):
                 await send_safe(uid, context.bot, "❌ Рассылка не найдена", MAIN_MENU)
@@ -955,9 +1100,13 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
+    # АВТОРИЗАЦИЯ И ЗАПУСК
     elif step in ['start_247', 'send_once']:
+        if not update.message.text:
+            return
         bid = step_data['bid']
         is_247 = (step == 'start_247')
+        text = update.message.text.strip()
         
         if not text.startswith('+'):
             await send_safe(uid, context.bot, "❌ Формат: +79123456789", CANCEL_BTN)
@@ -979,12 +1128,15 @@ async def message_handler(update: Update, context):
         try:
             await client.connect()
             await client.send_code_request(text)
-            await send_safe(uid, context.bot, "📲 Введите код из Telegram:\n\nФормат: code12345", CANCEL_BTN)
+            await send_safe(uid, context.bot, "📲 Введите код из Telegram:\n\nФормат: code12345\n\n✅ Сессия сохранится на 30 дней", CANCEL_BTN)
         except Exception as e:
             await send_safe(uid, context.bot, f"❌ Ошибка: {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
     
     elif step == 'waiting_code':
+        if not update.message.text:
+            return
+        text = update.message.text.strip()
         match = re.search(r'(\d{5,6})', text)
         code = match.group(1) if match else None
         if not code:
@@ -996,6 +1148,9 @@ async def message_handler(update: Update, context):
         await send_safe(uid, context.bot, "🔐 Введите пароль 2FA (если есть)\n\nЕсли нет - отправьте /skip", CANCEL_BTN)
     
     elif step == 'waiting_2fa':
+        if not update.message.text:
+            return
+        text = update.message.text.strip()
         password = None if text == '/skip' else text
         client = sessions.get(uid)
         
@@ -1020,6 +1175,9 @@ async def message_handler(update: Update, context):
         interval = bc.get('interval', 30)
         random_min = bc.get('random_min', 0)
         random_max = bc.get('random_max', 0)
+        media_type = bc.get('media_type')
+        media_file_id = bc.get('media_file_id')
+        media_caption = bc.get('media_caption', msg)
         
         try:
             await client.sign_in(phone, code=code)
@@ -1066,19 +1224,25 @@ async def message_handler(update: Update, context):
         bc['active'] = True
         save_data()
         
+        media_info = ""
+        if media_type == 'photo':
+            media_info = "\n📷 С ФОТО"
+        elif media_type == 'video':
+            media_info = "\n🎥 С ВИДЕО"
+        
         if is_247:
-            await send_safe(uid, context.bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📢 Рассылка #{bid+1}\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}\n\n✅ Сессия сохранена!", MAIN_MENU)
+            await send_safe(uid, context.bot, f"🚀 <b>ЗАПУСК 24/7</b>\n\n📢 Рассылка #{bid+1}\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек{media_info}\n{'🎲 Рандом: ' + str(random_min) + '-' + str(random_max) + ' сек' if random_min else ''}\n\n✅ Сессия сохранена!", MAIN_MENU)
             
             task_key = f"{uid}_{bid}"
             if task_key not in active_tasks or active_tasks[task_key].done():
-                task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max))
+                task = asyncio.create_task(run_broadcast_247(uid, bid, client, valid_groups, msg, interval, random_min, random_max, media_type, media_file_id, media_caption))
                 active_tasks[task_key] = task
         else:
-            await send_safe(uid, context.bot, f"📤 <b>ОТПРАВКА РАЗОМ</b>\n\n📢 Рассылка #{bid+1}\n👥 Групп: {len(valid_groups)}", MAIN_MENU)
+            await send_safe(uid, context.bot, f"📤 <b>ОТПРАВКА РАЗОМ</b>\n\n📢 Рассылка #{bid+1}\n👥 Групп: {len(valid_groups)}{media_info}", MAIN_MENU)
             success = 0
             for group in valid_groups:
                 try:
-                    await client.send_message(group, msg)
+                    await send_message_with_media(client, group, msg, media_type, media_file_id, media_caption)
                     success += 1
                     await asyncio.sleep(2)
                 except:
@@ -1087,13 +1251,11 @@ async def message_handler(update: Update, context):
         
         del user_states[uid]
 
-# ==================== HTTP СЕРВЕР ДЛЯ RENDER (ЧИНИМ LIVE) ====================
+# ==================== HTTP СЕРВЕР ДЛЯ RENDER ====================
 async def health_check(request):
-    """Health check endpoint для Render и cron-job.org"""
     return web.Response(text="OK", status=200, headers={'Content-Type': 'text/plain'})
 
 async def handle_webhook(request):
-    """Обработка webhook от Telegram"""
     try:
         data = await request.json()
         update = Update.de_json(data, bot_app.bot)
@@ -1104,7 +1266,6 @@ async def handle_webhook(request):
         return web.Response(text="ERROR", status=500)
 
 async def start_http_server():
-    """Запускает HTTP сервер для Render (держит бота живым)"""
     app = web.Application()
     app.router.add_get('/health', health_check)
     app.router.add_get('/ping', health_check)
@@ -1116,10 +1277,6 @@ async def start_http_server():
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
     print(f"[HTTP] Сервер запущен на порту {PORT}")
-    print(f"[HTTP] Health check: {RENDER_URL}/health")
-    print(f"[HTTP] Webhook: {RENDER_URL}/webhook/{BOT_TOKEN}")
-    
-    # Бесконечное ожидание
     await asyncio.Event().wait()
 
 # ==================== ЗАПУСК БОТА ====================
@@ -1127,34 +1284,27 @@ async def run_bot():
     global bot_app
     load_data()
     
-    # Создаём приложение бота
     bot_app = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем обработчики
     bot_app.add_handler(CommandHandler("start", start_cmd))
     bot_app.add_handler(CommandHandler("skip", skip_cmd))
     bot_app.add_handler(CallbackQueryHandler(button_handler))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    bot_app.add_handler(MessageHandler(filters.PHOTO, message_handler))
+    bot_app.add_handler(MessageHandler(filters.VIDEO, message_handler))
     
-    # Инициализируем бота
     await bot_app.initialize()
     await bot_app.start()
     
-    # Устанавливаем webhook (чтобы бот получал обновления через HTTP, а не polling)
     webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
     await bot_app.bot.set_webhook(webhook_url)
     print(f"[WEBHOOK] Установлен: {webhook_url}")
     
     print("=" * 60)
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
-    print(f"🌐 WEBHOOK MODE: {webhook_url}")
-    print(f"❤️ HEALTH CHECK: {RENDER_URL}/health")
-    print("=" * 60)
-    print("📌 БОТ ТЕПЕРЬ ВСЕГДА LIVE НА RENDER")
-    print("📌 НЕ ЗАСЫПАЕТ БЛАГОДАРЯ WEBHOOK + HTTP SERVER")
+    print("📝 МОЖНО ДОБАВЛЯТЬ ТЕКСТ + ФОТО + ВИДЕО")
     print("=" * 60)
     
-    # Запускаем HTTP сервер (держит бота живым)
     await start_http_server()
 
 def main():
