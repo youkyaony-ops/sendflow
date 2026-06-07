@@ -53,7 +53,6 @@ def save_data():
         
         with open(BACKUP_FILE, 'w', encoding='utf-8') as f:
             json.dump(clean_data, f, ensure_ascii=False, indent=2)
-        print(f"[SAVE] Данные сохранены для {len(user_data)} пользователей")
         return True
     except Exception as e:
         print(f"Save error: {e}")
@@ -66,12 +65,10 @@ def load_data():
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
                 user_data = {int(k): v for k, v in loaded.items()}
-                print(f"[LOAD] Загружены данные для {len(user_data)} пользователей")
         elif os.path.exists(BACKUP_FILE):
             with open(BACKUP_FILE, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
                 user_data = {int(k): v for k, v in loaded.items()}
-                print(f"[LOAD] Загружены данные из бэкапа для {len(user_data)} пользователей")
         else:
             user_data = {}
         return True
@@ -92,7 +89,6 @@ def save_user(uid):
             'total_errors': 0
         }
         save_data()
-        print(f"[USER] Новый пользователь {uid} создан")
     return user_data[uid]
 
 def get_session_path(user_id):
@@ -128,7 +124,6 @@ async def get_client(user_id):
         await client.connect()
         if await client.is_user_authorized():
             sessions[user_id] = client
-            print(f"[CLIENT] Клиент загружен для {user_id}")
             return client
         else:
             await client.disconnect()
@@ -148,7 +143,7 @@ MAIN_MENU = InlineKeyboardMarkup([
 
 def get_broadcast_actions(bid):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 ТЕКСТ + ФОТО", callback_data=f'edit_content_{bid}')],
+        [InlineKeyboardButton("📝 ТЕКСТ", callback_data=f'edit_text_{bid}'), InlineKeyboardButton("📷 ФОТО", callback_data=f'edit_photo_{bid}')],
         [InlineKeyboardButton("👥 ГРУППЫ", callback_data=f'edit_groups_{bid}')],
         [InlineKeyboardButton("⏱ ИНТЕРВАЛ", callback_data=f'edit_interval_{bid}'), InlineKeyboardButton("🎲 РАНДОМ", callback_data=f'edit_random_{bid}')],
         [InlineKeyboardButton("🔄 ЗАЦИКЛИТЬ", callback_data=f'toggle_loop_{bid}'), InlineKeyboardButton("📅 РАСПИСАНИЕ", callback_data=f'edit_schedule_{bid}')],
@@ -214,18 +209,14 @@ async def show_broadcast_menu(uid, bot, bid):
     
     status = "🟢 АКТИВНА" if is_running else "🔴 ОСТАНОВЛЕНА"
     
-    media_info = ""
-    if bc.get('has_photo'):
-        media_info = "\n📷 <b>Фото:</b> есть"
-    
     txt = f"📢 <b>{bc.get('name', f'Рассылка {bid+1}')}</b>\n\n"
     txt += f"Статус: {status}\n"
     txt += f"📝 Текст: {'✅' if bc.get('text') else '❌'}\n"
     if bc.get('text'):
         preview = bc['text'][:50] + '...' if len(bc['text']) > 50 else bc['text']
         txt += f"   → {preview}\n"
-    txt += media_info
-    txt += f"\n👥 Групп: {len(bc.get('groups', []))}\n"
+    txt += f"📷 Фото: {'✅' if bc.get('has_photo') else '❌'}\n"
+    txt += f"👥 Групп: {len(bc.get('groups', []))}\n"
     if bc.get('groups'):
         txt += f"   → {', '.join(bc['groups'][:3])}\n"
     txt += f"⏱ Интервал: {bc.get('interval', 30)} сек\n"
@@ -324,7 +315,6 @@ async def button_handler(update: Update, context):
         }
         user_data[uid]['broadcasts'].append(new_broadcast)
         save_data()
-        print(f"[NEW] Создана новая рассылка #{new_id+1} для {uid}")
         await show_broadcast_menu(uid, context.bot, new_id)
     
     elif data == 'my_groups':
@@ -380,11 +370,11 @@ async def button_handler(update: Update, context):
         await send_safe(uid, context.bot, "❓ <b>ПОМОЩЬ</b>\n\nВыберите раздел:", HELP_MENU)
     
     elif data == 'help_quick':
-        txt = "🚀 <b>БЫСТРЫЙ СТАРТ</b>\n\n1️⃣ Нажми '➕ НОВАЯ РАССЫЛКА'\n2️⃣ Нажми '📝 ТЕКСТ + ФОТО' и отправь сообщение (текст + фото)\n3️⃣ Настрой группы\n4️⃣ Нажми '🚀 ЗАПУСТИТЬ 24/7'\n5️⃣ Авторизуйся (один раз)\n\n✅ Рассылка работает 24/7!"
+        txt = "🚀 <b>БЫСТРЫЙ СТАРТ</b>\n\n1️⃣ Нажми '➕ НОВАЯ РАССЫЛКА'\n2️⃣ Нажми '📝 ТЕКСТ' - введи текст\n3️⃣ Нажми '📷 ФОТО' - отправь фото с подписью\n4️⃣ Настрой группы\n5️⃣ Нажми '🚀 ЗАПУСТИТЬ 24/7'\n\n✅ Рассылка работает 24/7!"
         await send_safe(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_create':
-        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>Текст + Фото:</b>\nОтправь сообщение с фото как обычно (можно с подписью)\nБот запомнит всё в точности как ты отправил!\n\n<b>Группы:</b> через запятую: @group1, @group2\n<b>Интервал:</b> 5-300 секунд\n\n💡 Бот должен быть участником всех групп!"
+        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>Текст:</b> просто отправь текст\n<b>Фото:</b> отправь фото с подписью\n<b>Группы:</b> через запятую: @group1, @group2\n<b>Интервал:</b> 5-300 секунд\n\n💡 Бот должен быть участником всех групп!"
         await send_safe(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_errors':
@@ -395,10 +385,17 @@ async def button_handler(update: Update, context):
         bid = int(data.split('_')[2])
         await show_broadcast_menu(uid, context.bot, bid)
     
-    elif data.startswith('edit_content_'):
+    # ===== РЕДАКТИРОВАНИЕ ТЕКСТА =====
+    elif data.startswith('edit_text_'):
         bid = int(data.split('_')[2])
-        user_states[uid] = {'step': 'edit_content', 'bid': bid}
-        await send_safe(uid, context.bot, "📝 <b>ОТПРАВЬТЕ СООБЩЕНИЕ</b>\n\nМожно отправить:\n• Текст с эмодзи\n• Фото с подписью\n• Текст + Фото вместе\n\n<i>Бот запомнит всё в точности как вы отправили!</i>", CANCEL_BTN, parse_mode='HTML')
+        user_states[uid] = {'step': 'edit_text', 'bid': bid}
+        await send_safe(uid, context.bot, "📝 Введите текст рассылки (можно с эмодзи):\n\nОтправь текстовое сообщение", CANCEL_BTN)
+    
+    # ===== РЕДАКТИРОВАНИЕ ФОТО =====
+    elif data.startswith('edit_photo_'):
+        bid = int(data.split('_')[2])
+        user_states[uid] = {'step': 'edit_photo', 'bid': bid}
+        await send_safe(uid, context.bot, "📷 Отправьте ФОТО для рассылки\n\nМожно добавить подпись - она станет текстом сообщения\n\nОтправь фото с подписью или без", CANCEL_BTN)
     
     elif data.startswith('edit_groups_'):
         bid = int(data.split('_')[2])
@@ -461,7 +458,7 @@ async def button_handler(update: Update, context):
         bc = user_data[uid]['broadcasts'][bid]
         
         if not bc.get('text') and not bc.get('photo_file_id'):
-            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ или ФОТО для рассылки!\nНажми '📝 ТЕКСТ + ФОТО' и отправь сообщение", BACK_BTN)
+            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ или ФОТО для рассылки!", BACK_BTN)
             await show_broadcast_menu(uid, context.bot, bid)
             return
         if not bc.get('groups'):
@@ -489,7 +486,7 @@ async def button_handler(update: Update, context):
         bc = user_data[uid]['broadcasts'][bid]
         
         if not bc.get('text') and not bc.get('photo_file_id'):
-            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ или ФОТО для рассылки!\nНажми '📝 ТЕКСТ + ФОТО' и отправь сообщение", BACK_BTN)
+            await send_safe(uid, context.bot, "❌ Сначала настройте ТЕКСТ или ФОТО для рассылки!", BACK_BTN)
             await show_broadcast_menu(uid, context.bot, bid)
             return
         if not bc.get('groups'):
@@ -844,21 +841,33 @@ async def message_handler(update: Update, context):
             await send_safe(uid, context.bot, f"⚠️ Группа {group} уже есть", GROUPS_MENU)
         del user_states[uid]
     
-    # РЕДАКТИРОВАНИЕ КОНТЕНТА (ТЕКСТ + ФОТО)
-    elif step == 'edit_content':
+    # РЕДАКТИРОВАНИЕ ТЕКСТА
+    elif step == 'edit_text':
+        if not update.message.text:
+            await send_safe(uid, context.bot, "❌ Отправьте текст", CANCEL_BTN)
+            return
+        bid = step_data['bid']
+        text = update.message.text.strip()
+        
+        if len(text) > 4096:
+            await send_safe(uid, context.bot, "❌ Текст слишком длинный (макс 4096 символов)", CANCEL_BTN)
+            return
+        
+        if bid >= len(user_data[uid].get('broadcasts', [])):
+            await send_safe(uid, context.bot, "❌ Рассылка не найдена", MAIN_MENU)
+            del user_states[uid]
+            return
+        
+        user_data[uid]['broadcasts'][bid]['text'] = text
+        save_data()
+        await send_safe(uid, context.bot, "✅ Текст сохранён!")
+        del user_states[uid]
+        await show_broadcast_menu(uid, context.bot, bid)
+    
+    # РЕДАКТИРОВАНИЕ ФОТО
+    elif step == 'edit_photo':
         bid = step_data['bid']
         
-        # Сохраняем текст если есть
-        if update.message.text:
-            text = update.message.text.strip()
-            if len(text) > 4096:
-                await send_safe(uid, context.bot, "❌ Текст слишком длинный (макс 4096 символов)", CANCEL_BTN)
-                return
-            user_data[uid]['broadcasts'][bid]['text'] = text
-            save_data()
-            await send_safe(uid, context.bot, "✅ Текст сохранён!")
-        
-        # Сохраняем фото если есть
         if update.message.photo:
             file_id = update.message.photo[-1].file_id
             user_data[uid]['broadcasts'][bid]['has_photo'] = True
@@ -867,10 +876,8 @@ async def message_handler(update: Update, context):
             save_data()
             await send_safe(uid, context.bot, "✅ Фото сохранено!")
             print(f"[PHOTO] Сохранено фото для рассылки #{bid+1}")
-        
-        # Если ничего не отправлено
-        if not update.message.text and not update.message.photo:
-            await send_safe(uid, context.bot, "❌ Отправьте текст или фото", CANCEL_BTN)
+        else:
+            await send_safe(uid, context.bot, "❌ Отправьте ФОТО", CANCEL_BTN)
             return
         
         del user_states[uid]
@@ -1215,9 +1222,9 @@ async def run_bot():
     
     print("=" * 60)
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
-    print("📝 ТЕКСТ + ФОТО - В ТОЧНОСТИ КАК ОТПРАВЛЕНО")
-    print("💾 ДАННЫЕ СОХРАНЯЮТСЯ АВТОМАТИЧЕСКИ")
-    print("🔄 РАССЫЛКИ НЕ ПРОПАДАЮТ ПОСЛЕ ПЕРЕЗАПУСКА")
+    print("📝 ТЕКСТ - отдельная кнопка")
+    print("📷 ФОТО - отдельная кнопка")
+    print("💾 ДАННЫЕ СОХРАНЯЮТСЯ")
     print("=" * 60)
     
     await start_http_server()
