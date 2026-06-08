@@ -97,11 +97,13 @@ async def get_client(user_id):
         await client.connect()
         if await client.is_user_authorized():
             sessions[user_id] = client
+            print(f"[CLIENT] Загружена сессия для {user_id}")
             return client
         else:
             await client.disconnect()
             return None
-    except:
+    except Exception as e:
+        print(f"[CLIENT] Ошибка: {e}")
         return None
 
 # ==================== КЛАВИАТУРЫ ====================
@@ -268,7 +270,6 @@ async def button_handler(update: Update, context):
         bid = int(data.split('_')[1])
         await show_broadcast_menu(uid, context.bot, bid)
     
-    # ===== ДЕЙСТВИЯ С РАССЫЛКОЙ =====
     elif data.startswith('text_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'edit_text', 'bid': bid}
@@ -314,7 +315,7 @@ async def button_handler(update: Update, context):
             return
         
         user_states[uid] = {'step': 'auth', 'bid': bid}
-        await send_safe(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789", CANCEL_BTN)
+        await send_safe(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789\n\n(Сессия сохранится)", CANCEL_BTN)
     
     elif data.startswith('stop_'):
         bid = int(data.split('_')[1])
@@ -385,45 +386,63 @@ async def start_broadcast(uid, bot, bid, client):
         try:
             await client.get_entity(group)
             valid_groups.append(group)
-        except:
+            print(f"[GROUP] {group} - доступна")
+        except Exception as e:
+            print(f"[GROUP] {group} - недоступна: {e}")
             await send_safe(uid, bot, f"⚠️ {group} - недоступна")
     
     if not valid_groups:
-        await send_safe(uid, bot, "❌ Нет доступных групп!")
+        await send_safe(uid, bot, "❌ Нет доступных групп!\nПроверьте что бот добавлен в группы")
         return
     
     bc['groups'] = valid_groups
     bc['active'] = True
     save_data()
     
-    await send_safe(uid, bot, f"🚀 ЗАПУСК 24/7\n\nГрупп: {len(valid_groups)}\nИнтервал: {interval} сек")
+    media_info = "📷 с фото" if photo_file_id else "📝 текстом"
+    await send_safe(uid, bot, f"🚀 <b>РАССЫЛКА ЗАПУЩЕНА</b>\n\n📊 Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n📎 Тип: {media_info}\n\n✅ Рассылка будет идти 24/7", MAIN_MENU)
     
     task_key = f"{uid}_{bid}"
     task = asyncio.create_task(run_broadcast(uid, bid, client, valid_groups, text, interval, photo_file_id, photo_caption))
     active_tasks[task_key] = task
+    print(f"[BROADCAST] Запущена рассылка #{bid+1} для {uid} в {len(valid_groups)} групп")
 
 async def run_broadcast(uid, bid, client, groups, text, interval, photo_file_id, photo_caption):
     sent = 0
+    print(f"[RUN] Бесконечная рассылка #{bid+1} запущена")
+    
     try:
         while True:
             for group in groups:
                 try:
                     if photo_file_id:
                         await client.send_file(group, photo_file_id, caption=photo_caption or text)
+                        print(f"[SEND] {group} - фото отправлено")
                     else:
                         await client.send_message(group, text)
+                        print(f"[SEND] {group} - текст отправлен")
                     
                     sent += 1
-                    user_data[uid]['broadcasts'][bid]['sent'] = sent
-                    save_data()
+                    if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
+                        user_data[uid]['broadcasts'][bid]['sent'] = sent
+                        save_data()
+                    
                 except FloodWaitError as e:
+                    print(f"[FLOOD] Ждём {e.seconds} сек")
                     await asyncio.sleep(e.seconds)
-                except:
-                    pass
+                except Exception as e:
+                    print(f"[ERROR] Ошибка отправки в {group}: {e}")
+                    if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
+                        user_data[uid]['broadcasts'][bid]['errors'] = user_data[uid]['broadcasts'][bid].get('errors', 0) + 1
+                        save_data()
+                
                 await asyncio.sleep(interval)
+                
     except asyncio.CancelledError:
-        user_data[uid]['broadcasts'][bid]['active'] = False
-        save_data()
+        print(f"[STOP] Рассылка #{bid+1} остановлена. Отправлено: {sent}")
+        if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
+            user_data[uid]['broadcasts'][bid]['active'] = False
+            save_data()
 
 # ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
 async def message_handler(update: Update, context):
@@ -451,6 +470,8 @@ async def message_handler(update: Update, context):
             user_data[uid]['groups'] = groups
             save_data()
             await send_safe(uid, context.bot, f"✅ Группа {group} добавлена", GROUPS_MENU)
+        else:
+            await send_safe(uid, context.bot, f"⚠️ Группа {group} уже есть", GROUPS_MENU)
         del user_states[uid]
     
     # РЕДАКТИРОВАНИЕ ТЕКСТА
@@ -495,6 +516,9 @@ async def message_handler(update: Update, context):
             user_data[uid]['broadcasts'][bid]['groups'] = groups
             save_data()
             await send_safe(uid, context.bot, f"✅ Сохранено {len(groups)} групп")
+        else:
+            await send_safe(uid, context.bot, "❌ Не найдено групп", CANCEL_BTN)
+            return
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
@@ -518,7 +542,7 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
-    # АВТОРИЗАЦИЯ
+    # АВТОРИЗАЦИЯ (С АВТОМАТИЧЕСКИМ ОПРЕДЕЛЕНИЕМ 2FA)
     elif step == 'auth':
         if not update.message.text:
             return
@@ -537,9 +561,9 @@ async def message_handler(update: Update, context):
         try:
             await client.connect()
             await client.send_code_request(phone)
-            await send_safe(uid, context.bot, "📲 Введите код:\ncode12345", CANCEL_BTN)
+            await send_safe(uid, context.bot, "📲 Введите код из Telegram:\n\nФормат: code12345", CANCEL_BTN)
         except Exception as e:
-            await send_safe(uid, context.bot, f"❌ {str(e)[:100]}", MAIN_MENU)
+            await send_safe(uid, context.bot, f"❌ Ошибка: {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
     
     elif step == 'waiting_code':
@@ -553,15 +577,15 @@ async def message_handler(update: Update, context):
         
         user_states[uid]['code'] = code
         user_states[uid]['step'] = 'waiting_2fa'
-        await send_safe(uid, context.bot, "🔐 Пароль 2FA (если есть) или /skip", CANCEL_BTN)
+        await send_safe(uid, context.bot, "🔐 Если есть пароль 2FA - введите его\nЕсли нет - отправьте /skip", CANCEL_BTN)
     
     elif step == 'waiting_2fa':
         if not update.message.text:
             return
-        password = None if update.message.text.strip() == '/skip' else update.message.text.strip()
+        password = None if update.message.text.strip().lower() == '/skip' else update.message.text.strip()
         client = sessions.get(uid)
         if not client:
-            await send_safe(uid, context.bot, "❌ Ошибка", MAIN_MENU)
+            await send_safe(uid, context.bot, "❌ Ошибка сессии", MAIN_MENU)
             del user_states[uid]
             return
         
@@ -570,24 +594,31 @@ async def message_handler(update: Update, context):
         code = user_states[uid]['code']
         
         try:
+            # Пробуем войти
             await client.sign_in(phone, code=code)
+            print(f"[AUTH] Пользователь {uid} вошёл без 2FA")
+            
         except SessionPasswordNeededError:
-            if not password:
-                await send_safe(uid, context.bot, "🔐 Введите пароль 2FA:", CANCEL_BTN)
+            # Если нужен пароль 2FA
+            if password is None:
+                await send_safe(uid, context.bot, "🔐 Требуется пароль 2FA. Введите пароль:", CANCEL_BTN)
                 return
             try:
                 await client.sign_in(password=password)
-            except:
-                await send_safe(uid, context.bot, "❌ Неверный пароль", CANCEL_BTN)
+                print(f"[AUTH] Пользователь {uid} вошёл с 2FA")
+            except Exception as e:
+                await send_safe(uid, context.bot, f"❌ Неверный пароль: {str(e)[:50]}", CANCEL_BTN)
                 return
         except Exception as e:
-            await send_safe(uid, context.bot, f"❌ {str(e)[:100]}", MAIN_MENU)
+            await send_safe(uid, context.bot, f"❌ Ошибка: {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
             return
         
-        user_data[uid]['sessions'] = {'phone': phone, 'is_authorized': True}
+        # Сохраняем сессию
+        user_data[uid]['sessions'] = {'phone': phone, 'is_authorized': True, 'last_used': str(datetime.now())}
         save_data()
         
+        # Запускаем рассылку
         await start_broadcast(uid, context.bot, bid, client)
         del user_states[uid]
 
