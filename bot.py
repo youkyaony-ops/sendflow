@@ -129,7 +129,6 @@ CANCEL_BTN = InlineKeyboardMarkup([[InlineKeyboardButton("❌ ОТМЕНА", cal
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
 async def send_safe(chat_id, bot, text, keyboard=None):
-    """Отправка сообщения с поддержкой HTML разметки"""
     try:
         if keyboard:
             await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode='HTML')
@@ -402,22 +401,53 @@ async def start_broadcast(uid, bot, bid, client):
     source_chat_id = bc.get('source_chat_id')
     source_msg_id = bc.get('source_msg_id')
     
-    # Проверка групп
+    print(f"\n[DEBUG] Запуск рассылки #{bid+1}")
+    print(f"[DEBUG] source_chat_id: {source_chat_id} (тип: {type(source_chat_id)})")
+    print(f"[DEBUG] source_msg_id: {source_msg_id}")
+    print(f"[DEBUG] Группы: {groups}")
+    
+    if not source_chat_id or not source_msg_id:
+        await send_safe(uid, bot, "❌ Сообщение для пересылки не найдено!\nНажмите '📨 СООБЩЕНИЕ' и отправьте сообщение заново", MAIN_MENU)
+        return
+    
+    try:
+        message_to_forward = await client.get_messages(source_chat_id, ids=source_msg_id)
+        
+        if not message_to_forward:
+            message_to_forward = await client.get_messages('me', ids=source_msg_id)
+        
+        if not message_to_forward:
+            await send_safe(uid, bot, 
+                f"❌ <b>НЕ УДАЛОСЬ НАЙТИ СООБЩЕНИЕ</b>\n\n"
+                f"Возможно, сообщение было удалено.\n"
+                f"Нажмите '📨 СООБЩЕНИЕ' и отправьте сообщение заново.", 
+                MAIN_MENU)
+            return
+        
+        print(f"[DEBUG] Сообщение найдено: {message_to_forward.id}")
+        
+    except Exception as e:
+        print(f"[ERROR] Ошибка получения сообщения: {e}")
+        await send_safe(uid, bot, f"❌ Ошибка при получении сообщения: {str(e)[:100]}\n\nОтправьте сообщение заново через кнопку '📨 СООБЩЕНИЕ'", MAIN_MENU)
+        return
+    
     valid_groups = []
     for group in groups:
         try:
             entity = await client.get_entity(group)
             valid_groups.append(entity)
+            print(f"[DEBUG] Группа {group} - доступна")
         except Exception as e:
+            print(f"[DEBUG] Группа {group} - ошибка: {e}")
             await send_safe(uid, bot, f"⚠️ {group} - недоступна: {str(e)[:50]}")
     
     if not valid_groups:
         await send_safe(uid, bot, 
             "❌ <b>НЕТ ДОСТУПНЫХ ГРУПП</b>\n\n"
             "Проверьте:\n"
-            "1. Правильно ли указан юзернейм группы\n"
+            "1. Правильно ли указан юзернейм группы (с @)\n"
             "2. Добавлен ли бот в группу\n"
-            "3. Есть ли у бота права на отправку", 
+            "3. Есть ли у бота права на отправку сообщений", 
             MAIN_MENU)
         return
     
@@ -429,8 +459,9 @@ async def start_broadcast(uid, bot, bid, client):
         f"🚀 <b>РАССЫЛКА ЗАПУЩЕНА!</b>\n\n"
         f"✅ Групп: {len(valid_groups)}\n"
         f"⏱ Интервал: {interval} сек\n"
-        f"🔄 Режим: пересылка сообщений\n\n"
-        f"Для остановки нажмите кнопку СТОП в меню рассылки", 
+        f"📨 Пересылаемое сообщение ID: {source_msg_id}\n\n"
+        f"Сообщения начали отправляться!\n"
+        f"Для остановки нажмите СТОП в меню рассылки", 
         MAIN_MENU)
     
     task_key = f"{uid}_{bid}"
@@ -439,6 +470,8 @@ async def start_broadcast(uid, bot, bid, client):
 
 async def run_broadcast(uid, bid, client, groups, interval, source_chat_id, source_msg_id):
     sent = 0
+    print(f"[RUN] Бесконечная рассылка #{bid+1} запущена")
+    print(f"[RUN] Пересылаем сообщение {source_msg_id} из чата {source_chat_id}")
     
     try:
         while True:
@@ -446,22 +479,33 @@ async def run_broadcast(uid, bid, client, groups, interval, source_chat_id, sour
                 try:
                     message = await client.get_messages(source_chat_id, ids=source_msg_id)
                     
+                    if not message:
+                        message = await client.get_messages('me', ids=source_msg_id)
+                    
                     if message:
                         await client.forward_messages(group, message)
                         sent += 1
+                        group_name = group.username if hasattr(group, 'username') else str(group.id)
+                        print(f"[SEND] ✅ Переслано в {group_name} (#{sent})")
                         
                         if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
                             user_data[uid]['broadcasts'][bid]['sent'] = sent
                             save_data()
+                    else:
+                        print(f"[SEND] ❌ Сообщение {source_msg_id} не найдено")
+                        await asyncio.sleep(interval)
+                        continue
                     
                 except FloodWaitError as e:
+                    print(f"[FLOOD] Ждём {e.seconds} сек")
                     await asyncio.sleep(e.seconds)
                 except Exception as e:
-                    pass
+                    print(f"[ERROR] Ошибка отправки: {e}")
                 
                 await asyncio.sleep(interval)
                 
     except asyncio.CancelledError:
+        print(f"[STOP] Рассылка #{bid+1} остановлена. Отправлено: {sent}")
         if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
             user_data[uid]['broadcasts'][bid]['active'] = False
             save_data()
@@ -478,7 +522,6 @@ async def message_handler(update: Update, context):
         await main_menu(uid, context.bot)
         return
     
-    # ДОБАВЛЕНИЕ ГРУППЫ
     if step == 'add_group':
         if not update.message.text:
             await send_safe(uid, context.bot, "❌ Отправьте текст со ссылкой на группу", CANCEL_BTN)
@@ -503,7 +546,6 @@ async def message_handler(update: Update, context):
             await send_safe(uid, context.bot, f"⚠️ Группа {group} уже есть в вашем списке", GROUPS_MENU)
         del user_states[uid]
     
-    # ПОЛУЧЕНИЕ СООБЩЕНИЯ ДЛЯ РАССЫЛКИ
     elif step == 'waiting_message':
         bid = step_data['bid']
         
@@ -511,7 +553,6 @@ async def message_handler(update: Update, context):
         user_data[uid]['broadcasts'][bid]['source_msg_id'] = update.effective_message.message_id
         save_data()
         
-        # Определяем тип сообщения
         msg_type = "текст"
         if update.message.photo:
             msg_type = "фото"
@@ -522,15 +563,12 @@ async def message_handler(update: Update, context):
         
         await send_safe(uid, context.bot, 
             f"✅ <b>СООБЩЕНИЕ СОХРАНЕНО!</b>\n\n"
-            f"📎 Тип: {msg_type}\n\n"
-            f"Теперь настройте:\n"
-            f"1. 👥 ГРУППЫ - куда отправлять\n"
-            f"2. ⏱ ИНТЕРВАЛ - задержка между отправками\n\n"
-            f"После настройки нажмите 🚀 ЗАПУСТИТЬ")
+            f"📎 Тип: {msg_type}\n"
+            f"🆔 ID сообщения: {update.effective_message.message_id}\n\n"
+            f"Теперь настройте группы и интервал, затем нажмите ЗАПУСТИТЬ")
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
-    # РЕДАКТИРОВАНИЕ ГРУПП
     elif step == 'edit_groups':
         if not update.message.text:
             await send_safe(uid, context.bot, "❌ Отправьте список групп", CANCEL_BTN)
@@ -562,7 +600,6 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
-    # РЕДАКТИРОВАНИЕ ИНТЕРВАЛА
     elif step == 'edit_interval':
         if not update.message.text:
             await send_safe(uid, context.bot, "❌ Введите число", CANCEL_BTN)
@@ -587,7 +624,6 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
-    # АВТОРИЗАЦИЯ
     elif step == 'auth':
         if not update.message.text:
             await send_safe(uid, context.bot, "❌ Введите номер телефона", CANCEL_BTN)
