@@ -235,11 +235,11 @@ async def button_handler(update: Update, context):
         if groups:
             txt += "\n".join([f"{i+1}. {g}" for i, g in enumerate(groups)])
         else:
-            txt += "Нет сохранённых групп\n\n➕ Добавьте через кнопку ниже"
+            txt += "❌ Нет сохранённых групп\n\n📌 Чтобы добавить группу:\n1. Нажмите '➕ ДОБАВИТЬ ГРУППУ'\n2. Введите ссылку типа @group_name\n3. Группа сохранится и её можно будет выбрать в настройках рассылки"
         await send_safe(uid, context.bot, txt, GROUPS_MENU)
     
     elif data == 'settings':
-        await send_safe(uid, context.bot, "⚙️ <b>НАСТРОЙКИ</b>\n\nОчистите сессию если нужно перелогиниться", SETTINGS_MENU)
+        await send_safe(uid, context.bot, "⚙️ <b>НАСТРОЙКИ</b>\n\n🗑 Очистить сессию - удалить сохранённый вход в Telegram\n(если сменили пароль или нужно зайти под другим аккаунтом)", SETTINGS_MENU)
     
     elif data == 'clear_session':
         if uid in sessions:
@@ -254,7 +254,7 @@ async def button_handler(update: Update, context):
         if uid in user_data and 'sessions' in user_data[uid]:
             user_data[uid]['sessions'] = {}
             save_data()
-        await send_safe(uid, context.bot, "🗑 Сессия очищена", SETTINGS_MENU)
+        await send_safe(uid, context.bot, "🗑 Сессия очищена\n\nПри следующем запуске рассылки потребуется авторизация", SETTINGS_MENU)
     
     elif data.startswith('select_'):
         bid = int(data.split('_')[1])
@@ -263,34 +263,82 @@ async def button_handler(update: Update, context):
     elif data.startswith('message_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'waiting_message', 'bid': bid}
-        await send_safe(uid, context.bot, "📨 <b>ОТПРАВЬТЕ СООБЩЕНИЕ</b>\n\nОтправьте текст, фото, видео - что хотите рассылать\n\n<i>Бот запомнит и будет пересылать</i>", CANCEL_BTN, parse_mode='HTML')
+        await send_safe(uid, context.bot, 
+            "📨 <b>ЧТО НУЖНО СДЕЛАТЬ?</b>\n\n"
+            "Отправьте сообщение, которое будет рассылаться в группы.\n\n"
+            "<b>Это может быть:</b>\n"
+            "• 📝 Простой текст с эмодзи\n"
+            "• 📷 Фото с подписью\n"
+            "• 🎥 Видео с подписью\n"
+            "• 📄 Любой документ\n\n"
+            "<i>Бот запомнит ваше сообщение и будет пересылать его в группы ТОЧНО В ТАКОМ ЖЕ ВИДЕ!</i>\n\n"
+            "⬇️ <b>Просто отправьте сообщение сейчас</b> ⬇️", 
+            CANCEL_BTN, parse_mode='HTML')
     
     elif data.startswith('groups_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'edit_groups', 'bid': bid}
-        await send_safe(uid, context.bot, "👥 Введите группы через запятую:\n\nПример: @group1, @group2\n\nМожно использовать сохранённые группы из меню", CANCEL_BTN)
+        
+        # Показываем сохранённые группы если есть
+        saved_groups = user_data[uid].get('groups', [])
+        if saved_groups:
+            groups_list = "\n".join([f"   • {g}" for g in saved_groups])
+            await send_safe(uid, context.bot, 
+                f"👥 <b>НАСТРОЙКА ГРУПП</b>\n\n"
+                f"<b>Ваши сохранённые группы:</b>\n{groups_list}\n\n"
+                f"<b>Введите группы через запятую:</b>\n"
+                f"Пример: @group1, @group2, @group3\n\n"
+                f"💡 <i>Можно использовать сохранённые группы или ввести новые</i>", 
+                CANCEL_BTN, parse_mode='HTML')
+        else:
+            await send_safe(uid, context.bot, 
+                "👥 <b>НАСТРОЙКА ГРУПП</b>\n\n"
+                "У вас пока нет сохранённых групп.\n\n"
+                "<b>Введите группы для рассылки через запятую:</b>\n"
+                "Пример: @group1, @group2, https://t.me/group3\n\n"
+                "💡 <i>Позже вы можете сохранить группы в разделе 'МОИ ГРУППЫ'</i>", 
+                CANCEL_BTN, parse_mode='HTML')
     
     elif data.startswith('interval_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'edit_interval', 'bid': bid}
-        await send_safe(uid, context.bot, "⏱ Введите интервал (5-300 секунд):", CANCEL_BTN)
+        await send_safe(uid, context.bot, 
+            "⏱ <b>НАСТРОЙКА ИНТЕРВАЛА</b>\n\n"
+            "Интервал - это время между отправками сообщений в разные группы.\n\n"
+            "<b>Рекомендации:</b>\n"
+            "• 30-60 секунд - безопасный режим\n"
+            "• 10-20 секунд - быстрая рассылка\n"
+            "• 5 секунд - минимальный интервал\n\n"
+            "<b>Введите число от 5 до 300:</b>\n"
+            "Пример: 30", 
+            CANCEL_BTN, parse_mode='HTML')
     
     elif data.startswith('start_'):
         bid = int(data.split('_')[1])
         bc = user_data[uid]['broadcasts'][bid]
         
         if not bc.get('source_chat_id') or not bc.get('source_msg_id'):
-            await send_safe(uid, context.bot, "❌ Сначала отправьте сообщение для рассылки!\nНажмите '📨 СООБЩЕНИЕ'")
-            await show_broadcast_menu(uid, context.bot, bid)
+            await send_safe(uid, context.bot, 
+                "❌ <b>НЕЛЬЗЯ ЗАПУСТИТЬ РАССЫЛКУ</b>\n\n"
+                "Сначала настройте СООБЩЕНИЕ для рассылки!\n\n"
+                "1. Нажмите кнопку '📨 СООБЩЕНИЕ'\n"
+                "2. Отправьте текст, фото или видео\n"
+                "3. После этого сможете запустить рассылку", 
+                get_broadcast_actions(bid), parse_mode='HTML')
             return
         if not bc.get('groups'):
-            await send_safe(uid, context.bot, "❌ Сначала настройте ГРУППЫ!\nНажмите '👥 ГРУППЫ'")
-            await show_broadcast_menu(uid, context.bot, bid)
+            await send_safe(uid, context.bot, 
+                "❌ <b>НЕЛЬЗЯ ЗАПУСТИТЬ РАССЫЛКУ</b>\n\n"
+                "Сначала настройте ГРУППЫ для рассылки!\n\n"
+                "1. Нажмите кнопку '👥 ГРУППЫ'\n"
+                "2. Введите список групп через запятую\n"
+                "3. После этого сможете запустить рассылку", 
+                get_broadcast_actions(bid), parse_mode='HTML')
             return
         
         task_key = f"{uid}_{bid}"
         if task_key in active_tasks and not active_tasks[task_key].done():
-            await send_safe(uid, context.bot, "⚠️ Рассылка уже запущена")
+            await send_safe(uid, context.bot, "⚠️ Рассылка уже запущена", MAIN_MENU)
             await show_broadcast_menu(uid, context.bot, bid)
             return
         
@@ -300,7 +348,13 @@ async def button_handler(update: Update, context):
             return
         
         user_states[uid] = {'step': 'auth', 'bid': bid}
-        await send_safe(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789\n\n(Сессия сохранится)", CANCEL_BTN)
+        await send_safe(uid, context.bot, 
+            "🔐 <b>АВТОРИЗАЦИЯ В TELEGRAM</b>\n\n"
+            "Для запуска рассылки нужно войти в ваш Telegram аккаунт.\n\n"
+            "<b>Введите номер телефона:</b>\n"
+            "Пример: +79123456789\n\n"
+            "<i>Сессия сохранится, в следующий раз входить не придётся</i>", 
+            CANCEL_BTN, parse_mode='HTML')
     
     elif data.startswith('stop_'):
         bid = int(data.split('_')[1])
@@ -309,7 +363,7 @@ async def button_handler(update: Update, context):
             active_tasks[task_key].cancel()
             user_data[uid]['broadcasts'][bid]['active'] = False
             save_data()
-            await send_safe(uid, context.bot, f"🛑 Рассылка #{bid+1} остановлена")
+            await send_safe(uid, context.bot, f"🛑 Рассылка #{bid+1} остановлена", MAIN_MENU)
         await show_broadcast_menu(uid, context.bot, bid)
     
     elif data.startswith('delete_'):
@@ -319,17 +373,25 @@ async def button_handler(update: Update, context):
             active_tasks[task_key].cancel()
         user_data[uid]['broadcasts'].pop(bid)
         save_data()
-        await send_safe(uid, context.bot, f"🗑 Рассылка #{bid+1} удалена")
+        await send_safe(uid, context.bot, f"🗑 Рассылка #{bid+1} удалена", MAIN_MENU)
         await main_menu(uid, context.bot)
     
     elif data == 'add_group':
         user_states[uid] = {'step': 'add_group'}
-        await send_safe(uid, context.bot, "➕ Введите ссылку на группу:\n@group_name или https://t.me/group", CANCEL_BTN)
+        await send_safe(uid, context.bot, 
+            "➕ <b>ДОБАВЛЕНИЕ ГРУППЫ</b>\n\n"
+            "Введите ссылку на группу в одном из форматов:\n\n"
+            "• @group_name\n"
+            "• https://t.me/group_name\n"
+            "• t.me/group_name\n\n"
+            "Пример: @my_channel\n\n"
+            "<i>Группа сохранится и будет доступна для всех рассылок</i>", 
+            CANCEL_BTN, parse_mode='HTML')
     
     elif data == 'cancel':
         if uid in user_states:
             del user_states[uid]
-        await main_menu(uid, context.bot, "❌ Отменено")
+        await main_menu(uid, context.bot, "❌ Действие отменено")
 
 # ==================== ЗАПУСК РАССЫЛКИ ====================
 async def start_broadcast(uid, bot, bid, client):
@@ -339,7 +401,7 @@ async def start_broadcast(uid, bot, bid, client):
     source_chat_id = bc.get('source_chat_id')
     source_msg_id = bc.get('source_msg_id')
     
-    # Проверка групп и получение сущностей
+    # Проверка групп
     valid_groups = []
     for group in groups:
         try:
@@ -349,14 +411,28 @@ async def start_broadcast(uid, bot, bid, client):
             await send_safe(uid, bot, f"⚠️ {group} - недоступна: {str(e)[:50]}")
     
     if not valid_groups:
-        await send_safe(uid, bot, "❌ Нет доступных групп!\n\nПроверьте:\n1. Правильно ли указан юзернейм\n2. Добавлен ли бот в группу")
+        await send_safe(uid, bot, 
+            "❌ <b>НЕТ ДОСТУПНЫХ ГРУПП</b>\n\n"
+            "Проверьте:\n"
+            "1. Правильно ли указан юзернейм группы\n"
+            "2. Добавлен ли бот в группу\n"
+            "3. Есть ли у бота права на отправку\n\n"
+            "Исправьте ошибки и запустите рассылку заново", 
+            MAIN_MENU, parse_mode='HTML')
         return
     
     bc['groups'] = [g.username if hasattr(g, 'username') else str(g.id) for g in valid_groups]
     bc['active'] = True
     save_data()
     
-    await send_safe(uid, bot, f"🚀 <b>РАССЫЛКА ЗАПУЩЕНА!</b>\n\n✅ Групп: {len(valid_groups)}\n⏱ Интервал: {interval} сек\n🔄 Режим: пересылка\n\nСообщения начали отправляться!", MAIN_MENU)
+    await send_safe(uid, bot, 
+        f"🚀 <b>РАССЫЛКА ЗАПУЩЕНА!</b>\n\n"
+        f"✅ Групп: {len(valid_groups)}\n"
+        f"⏱ Интервал: {interval} сек\n"
+        f"🔄 Режим: пересылка сообщений\n\n"
+        f"Сообщения начали отправляться!\n"
+        f"Для остановки нажмите кнопку СТОП в меню рассылки", 
+        MAIN_MENU, parse_mode='HTML')
     
     task_key = f"{uid}_{bid}"
     task = asyncio.create_task(run_broadcast(uid, bid, client, valid_groups, interval, source_chat_id, source_msg_id))
@@ -369,24 +445,20 @@ async def run_broadcast(uid, bid, client, groups, interval, source_chat_id, sour
         while True:
             for group in groups:
                 try:
-                    # Получаем сообщение для пересылки
                     message = await client.get_messages(source_chat_id, ids=source_msg_id)
                     
                     if message:
-                        # Пересылаем
                         await client.forward_messages(group, message)
                         sent += 1
                         
                         if uid in user_data and bid < len(user_data[uid].get('broadcasts', [])):
                             user_data[uid]['broadcasts'][bid]['sent'] = sent
                             save_data()
-                    else:
-                        print(f"[ERROR] Сообщение не найдено для {uid}")
                     
                 except FloodWaitError as e:
                     await asyncio.sleep(e.seconds)
                 except Exception as e:
-                    print(f"[ERROR] {e}")
+                    pass
                 
                 await asyncio.sleep(interval)
                 
@@ -410,7 +482,9 @@ async def message_handler(update: Update, context):
     # ДОБАВЛЕНИЕ ГРУППЫ
     if step == 'add_group':
         if not update.message.text:
+            await send_safe(uid, context.bot, "❌ Отправьте текст со ссылкой на группу", CANCEL_BTN)
             return
+        
         text = update.message.text.strip()
         group = text.replace('https://t.me/', '@').replace('http://t.me/', '@').replace('t.me/', '@')
         if not group.startswith('@'):
@@ -421,28 +495,50 @@ async def message_handler(update: Update, context):
             groups.append(group)
             user_data[uid]['groups'] = groups
             save_data()
-            await send_safe(uid, context.bot, f"✅ Группа {group} добавлена!\n\nТеперь используйте её в рассылке через кнопку ГРУППЫ", GROUPS_MENU)
+            await send_safe(uid, context.bot, 
+                f"✅ <b>ГРУППА ДОБАВЛЕНА!</b>\n\n"
+                f"📌 {group}\n\n"
+                f"Теперь вы можете использовать её в рассылках.\n"
+                f"При настройке групп в рассылке введите этот юзернейм.", 
+                GROUPS_MENU, parse_mode='HTML')
         else:
-            await send_safe(uid, context.bot, f"⚠️ Группа {group} уже есть", GROUPS_MENU)
+            await send_safe(uid, context.bot, f"⚠️ Группа {group} уже есть в вашем списке", GROUPS_MENU)
         del user_states[uid]
     
     # ПОЛУЧЕНИЕ СООБЩЕНИЯ ДЛЯ РАССЫЛКИ
     elif step == 'waiting_message':
         bid = step_data['bid']
         
-        # Сохраняем информацию о сообщении
         user_data[uid]['broadcasts'][bid]['source_chat_id'] = update.effective_chat.id
         user_data[uid]['broadcasts'][bid]['source_msg_id'] = update.effective_message.message_id
         save_data()
         
-        await send_safe(uid, context.bot, f"✅ <b>СООБЩЕНИЕ СОХРАНЕНО!</b>\n\nТеперь настройте группы и интервал", parse_mode='HTML')
+        # Определяем тип сообщения для красивого ответа
+        msg_type = "текст"
+        if update.message.photo:
+            msg_type = "фото"
+        elif update.message.video:
+            msg_type = "видео"
+        elif update.message.document:
+            msg_type = "документ"
+        
+        await send_safe(uid, context.bot, 
+            f"✅ <b>СООБЩЕНИЕ СОХРАНЕНО!</b>\n\n"
+            f"📎 Тип: {msg_type}\n\n"
+            f"Теперь настройте:\n"
+            f"1. 👥 ГРУППЫ - куда отправлять\n"
+            f"2. ⏱ ИНТЕРВАЛ - задержка между отправками\n\n"
+            f"После настройки нажмите 🚀 ЗАПУСТИТЬ", 
+            parse_mode='HTML')
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
     
     # РЕДАКТИРОВАНИЕ ГРУПП
     elif step == 'edit_groups':
         if not update.message.text:
+            await send_safe(uid, context.bot, "❌ Отправьте список групп", CANCEL_BTN)
             return
+        
         bid = step_data['bid']
         text = update.message.text.strip()
         
@@ -457,9 +553,15 @@ async def message_handler(update: Update, context):
         if groups:
             user_data[uid]['broadcasts'][bid]['groups'] = groups
             save_data()
-            await send_safe(uid, context.bot, f"✅ Сохранено {len(groups)} групп!")
+            await send_safe(uid, context.bot, 
+                f"✅ <b>ГРУППЫ СОХРАНЕНЫ!</b>\n\n"
+                f"📋 Всего групп: {len(groups)}\n"
+                f"{chr(10).join([f'• {g}' for g in groups[:5]])}"
+                f"{chr(10) + '...' if len(groups) > 5 else ''}\n\n"
+                f"Теперь нажмите 🚀 ЗАПУСТИТЬ для начала рассылки", 
+                parse_mode='HTML')
         else:
-            await send_safe(uid, context.bot, "❌ Не найдено групп", CANCEL_BTN)
+            await send_safe(uid, context.bot, "❌ Не найдено корректных групп\n\nПример: @group1, @group2", CANCEL_BTN)
             return
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
@@ -467,19 +569,25 @@ async def message_handler(update: Update, context):
     # РЕДАКТИРОВАНИЕ ИНТЕРВАЛА
     elif step == 'edit_interval':
         if not update.message.text:
+            await send_safe(uid, context.bot, "❌ Введите число", CANCEL_BTN)
             return
+        
         bid = step_data['bid']
         try:
             interval = int(update.message.text.strip())
             if 5 <= interval <= 300:
                 user_data[uid]['broadcasts'][bid]['interval'] = interval
                 save_data()
-                await send_safe(uid, context.bot, f"✅ Интервал: {interval} сек")
+                await send_safe(uid, context.bot, 
+                    f"✅ <b>ИНТЕРВАЛ УСТАНОВЛЕН</b>\n\n"
+                    f"⏱ {interval} секунд между отправками\n\n"
+                    f"Теперь нажмите 🚀 ЗАПУСТИТЬ для начала рассылки", 
+                    parse_mode='HTML')
             else:
-                await send_safe(uid, context.bot, "❌ От 5 до 300", CANCEL_BTN)
+                await send_safe(uid, context.bot, "❌ Интервал должен быть от 5 до 300 секунд", CANCEL_BTN)
                 return
         except:
-            await send_safe(uid, context.bot, "❌ Введите число", CANCEL_BTN)
+            await send_safe(uid, context.bot, "❌ Введите целое число", CANCEL_BTN)
             return
         del user_states[uid]
         await show_broadcast_menu(uid, context.bot, bid)
@@ -487,11 +595,13 @@ async def message_handler(update: Update, context):
     # АВТОРИЗАЦИЯ
     elif step == 'auth':
         if not update.message.text:
+            await send_safe(uid, context.bot, "❌ Введите номер телефона", CANCEL_BTN)
             return
+        
         bid = step_data['bid']
         phone = update.message.text.strip()
         if not phone.startswith('+'):
-            await send_safe(uid, context.bot, "❌ Формат: +79123456789", CANCEL_BTN)
+            await send_safe(uid, context.bot, "❌ Номер должен начинаться с +\nПример: +79123456789", CANCEL_BTN)
             return
         
         user_states[uid] = {'step': 'waiting_code', 'bid': bid, 'phone': phone}
@@ -503,31 +613,46 @@ async def message_handler(update: Update, context):
         try:
             await client.connect()
             await client.send_code_request(phone)
-            await send_safe(uid, context.bot, "📲 Введите код из Telegram:\n\nФормат: code12345", CANCEL_BTN)
+            await send_safe(uid, context.bot, 
+                "📲 <b>КОД ОТПРАВЛЕН</b>\n\n"
+                "Telegram отправил код подтверждения в приложение.\n\n"
+                "<b>Введите код в формате:</b> code12345\n"
+                "Пример: code123456\n\n"
+                "<i>Где 123456 - цифры из сообщения Telegram</i>", 
+                CANCEL_BTN, parse_mode='HTML')
         except Exception as e:
             await send_safe(uid, context.bot, f"❌ Ошибка: {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
     
     elif step == 'waiting_code':
         if not update.message.text:
+            await send_safe(uid, context.bot, "❌ Введите код в формате code12345", CANCEL_BTN)
             return
+        
         match = re.search(r'(\d{5,6})', update.message.text.strip())
         code = match.group(1) if match else None
         if not code:
-            await send_safe(uid, context.bot, "❌ Формат: code12345", CANCEL_BTN)
+            await send_safe(uid, context.bot, "❌ Неверный формат\nНужно: code12345 (где 12345 - цифры из Telegram)", CANCEL_BTN)
             return
         
         user_states[uid]['code'] = code
         user_states[uid]['step'] = 'waiting_2fa'
-        await send_safe(uid, context.bot, "🔐 Если есть пароль 2FA - введите его\nЕсли нет - отправьте /skip", CANCEL_BTN)
+        await send_safe(uid, context.bot, 
+            "🔐 <b>ДВУХФАКТОРНАЯ АУТЕНТИФИКАЦИЯ</b>\n\n"
+            "Если у вас включена 2FA - введите пароль.\n"
+            "Если нет - отправьте /skip\n\n"
+            "<i>Пароль - это тот который вы вводите при входе в Telegram</i>", 
+            CANCEL_BTN, parse_mode='HTML')
     
     elif step == 'waiting_2fa':
         if not update.message.text:
+            await send_safe(uid, context.bot, "❌ Введите пароль или /skip", CANCEL_BTN)
             return
+        
         password = None if update.message.text.strip().lower() == '/skip' else update.message.text.strip()
         client = sessions.get(uid)
         if not client:
-            await send_safe(uid, context.bot, "❌ Ошибка сессии", MAIN_MENU)
+            await send_safe(uid, context.bot, "❌ Ошибка сессии, начните заново /start", MAIN_MENU)
             del user_states[uid]
             return
         
@@ -544,7 +669,7 @@ async def message_handler(update: Update, context):
             try:
                 await client.sign_in(password=password)
             except:
-                await send_safe(uid, context.bot, "❌ Неверный пароль", CANCEL_BTN)
+                await send_safe(uid, context.bot, "❌ Неверный пароль 2FA", CANCEL_BTN)
                 return
         except Exception as e:
             await send_safe(uid, context.bot, f"❌ Ошибка: {str(e)[:100]}", MAIN_MENU)
@@ -554,6 +679,7 @@ async def message_handler(update: Update, context):
         user_data[uid]['sessions'] = {'phone': phone, 'is_authorized': True, 'last_used': str(datetime.now())}
         save_data()
         
+        await send_safe(uid, context.bot, "✅ <b>АВТОРИЗАЦИЯ УСПЕШНА!</b>\n\nЗапускаем рассылку...", MAIN_MENU)
         await start_broadcast(uid, context.bot, bid, client)
         del user_states[uid]
 
