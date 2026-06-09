@@ -8,7 +8,7 @@ import shutil
 import sqlite3
 from datetime import datetime
 from telethon import TelegramClient, errors
-from telethon.errors import SessionPasswordNeededError, FloodWaitError, AuthKeyError
+from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError, AuthKeyError, RPCError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from aiohttp import web
@@ -22,8 +22,7 @@ SESSIONS_DIR = 'telegram_sessions'
 MEDIA_DIR = 'media_files'
 
 for folder in [SESSIONS_DIR, MEDIA_DIR]:
-    if not os.path.exists(folder):
-        os.makedirs(folder)
+    os.makedirs(folder, exist_ok=True)
 
 PORT = int(os.environ.get('PORT', 8080))
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://sendflow-12.onrender.com')
@@ -32,50 +31,36 @@ user_data = {}
 active_tasks = {}
 sessions = {}
 user_states = {}
-last_ping = {}
 
-# ==================== SQLite ДЛЯ СЕССИЙ (НАДЁЖНЕЕ) ====================
-def init_sessions_db():
-    conn = sqlite3.connect(os.path.join(SESSIONS_DIR, 'sessions.db'))
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS sessions (
-            user_id INTEGER PRIMARY KEY,
-            session_string TEXT,
-            phone TEXT,
-            created_at TIMESTAMP,
-            last_ping TIMESTAMP
-        )
-    ''')
+# ==================== SQLite ДЛЯ СЕССИЙ ====================
+conn = sqlite3.connect(os.path.join(SESSIONS_DIR, 'sessions.db'), check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS sessions (
+        user_id INTEGER PRIMARY KEY,
+        phone TEXT,
+        created_at TIMESTAMP,
+        last_ping TIMESTAMP
+    )
+''')
+conn.commit()
+
+def save_session_db(user_id, phone):
+    cursor.execute('INSERT OR REPLACE INTO sessions (user_id, phone, created_at, last_ping) VALUES (?, ?, ?, ?)',
+                   (user_id, phone, datetime.now(), datetime.now()))
     conn.commit()
-    conn.close()
 
-init_sessions_db()
-
-def save_session_to_db(user_id, session_string, phone):
-    conn = sqlite3.connect(os.path.join(SESSIONS_DIR, 'sessions.db'))
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO sessions (user_id, session_string, phone, created_at, last_ping)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, session_string, phone, datetime.now(), datetime.now()))
-    conn.commit()
-    conn.close()
-
-def get_session_from_db(user_id):
-    conn = sqlite3.connect(os.path.join(SESSIONS_DIR, 'sessions.db'))
-    cursor = conn.cursor()
-    cursor.execute('SELECT session_string, phone FROM sessions WHERE user_id = ?', (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row if row else (None, None)
-
-def update_session_ping(user_id):
-    conn = sqlite3.connect(os.path.join(SESSIONS_DIR, 'sessions.db'))
-    cursor = conn.cursor()
+def update_ping_db(user_id):
     cursor.execute('UPDATE sessions SET last_ping = ? WHERE user_id = ?', (datetime.now(), user_id))
     conn.commit()
-    conn.close()
+
+def delete_session_db(user_id):
+    cursor.execute('DELETE FROM sessions WHERE user_id = ?', (user_id,))
+    conn.commit()
+
+def has_session_db(user_id):
+    cursor.execute('SELECT user_id FROM sessions WHERE user_id = ?', (user_id,))
+    return cursor.fetchone() is not None
 
 # ==================== ДАННЫЕ ====================
 def save_data():
@@ -122,14 +107,15 @@ def get_media_path(uid, bid):
 def get_session_path(uid):
     return os.path.join(SESSIONS_DIR, f'session_{uid}.session')
 
+# ==================== КЛИЕНТ И KEEP-ALIVE ====================
 async def get_client(uid):
-    """Получение клиента с правильным хранением сессии"""
+    """Получение клиента с автоматическим восстановлением"""
     if uid in sessions:
         try:
             await sessions[uid].get_me()
+            update_ping_db(uid)
             return sessions[uid]
-        except AuthKeyError:
-            print(f"[AUTH] Ключ авторизации для {uid} устарел, пересоздаём...")
+        except (AuthKeyError, ConnectionError, RPCError):
             try:
                 await sessions[uid].disconnect()
             except:
@@ -145,26 +131,25 @@ async def get_client(uid):
         await client.connect()
         if await client.is_user_authorized():
             sessions[uid] = client
-            # Сохраняем строку сессии в БД для надёжности
-            session_string = client.session.save()
-            save_session_to_db(uid, session_string, user_data[uid].get('sessions', {}).get('phone', ''))
+            update_ping_db(uid)
             return client
-    except Exception as e:
-        print(f"[CLIENT] Ошибка для {uid}: {e}")
-    
+    except:
+        pass
     return None
 
-async def keep_alive(uid, bot):
-    """Пинг Telegram каждые 5 минут, чтобы сессия не умирала"""
+async def keep_alive_loop(uid):
+    """Пинг каждые 5 минут для поддержания сессии живой"""
     while True:
-        await asyncio.sleep(300)  # 5 минут
+        await asyncio.sleep(300)
         if uid in sessions:
             try:
                 await sessions[uid].get_me()
-                update_session_ping(uid)
+                update_ping_db(uid)
                 print(f"[KEEP_ALIVE] Пинг для {uid} успешен")
             except Exception as e:
                 print(f"[KEEP_ALIVE] Ошибка для {uid}: {e}")
+                # Пытаемся восстановить клиент
+                await get_client(uid)
 
 # ==================== КЛАВИАТУРЫ ====================
 MAIN_MENU = InlineKeyboardMarkup([
@@ -185,19 +170,20 @@ def get_broadcast_actions(bid):
     ])
 
 GROUPS_MENU = InlineKeyboardMarkup([
-    [InlineKeyboardButton("➕ ДОБАВИТЬ", callback_data='add_group')],
-    [InlineKeyboardButton("📋 СПИСОК", callback_data='list_groups')],
-    [InlineKeyboardButton("🗑 УДАЛИТЬ", callback_data='remove_group')],
+    [InlineKeyboardButton("➕ ДОБАВИТЬ ГРУППУ", callback_data='add_group')],
+    [InlineKeyboardButton("📋 ВСЕ ГРУППЫ", callback_data='list_groups')],
+    [InlineKeyboardButton("🗑 УДАЛИТЬ ГРУППУ", callback_data='remove_group')],
     [InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]
 ])
 
 SETTINGS_MENU = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🗑 ОЧИСТИТЬ СЕССИЮ", callback_data='clear_session')],
     [InlineKeyboardButton("🔄 СТАТУС", callback_data='check_status')],
     [InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]
 ])
 
 HELP_MENU = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🚀 СТАРТ", callback_data='help_quick')],
+    [InlineKeyboardButton("🚀 БЫСТРЫЙ СТАРТ", callback_data='help_quick')],
     [InlineKeyboardButton("📢 КАК СОЗДАТЬ", callback_data='help_create')],
     [InlineKeyboardButton("🔧 ОШИБКИ", callback_data='help_errors')],
     [InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]
@@ -216,7 +202,7 @@ async def send_msg(chat_id, bot, text, kb=None):
         pass
 
 async def main_menu(chat_id, bot, text=None):
-    msg = text if text else "🥓 SendFlow\n\nВыберите действие:"
+    msg = text if text else "🥓 <b>SendFlow</b>\n\nВыберите действие:"
     await send_msg(chat_id, bot, msg, MAIN_MENU)
 
 async def show_broadcast(uid, bot, bid):
@@ -224,11 +210,17 @@ async def show_broadcast(uid, bot, bid):
     has_photo = os.path.exists(get_media_path(uid, bid))
     is_running = f"{uid}_{bid}" in active_tasks and not active_tasks[f"{uid}_{bid}"].done()
     
-    txt = f"📢 <b>{bc['name']}</b>\n\n"
-    txt += f"Статус: {'🟢 РАБОТАЕТ' if is_running else '🔴 СТОП'}\n"
+    status = "🟢 АКТИВНА" if is_running else "🔴 ОСТАНОВЛЕНА"
+    txt = f"📢 <b>{bc.get('name', f'Рассылка {bid+1}')}</b>\n\n"
+    txt += f"Статус: {status}\n"
     txt += f"📝 Текст: {'✅' if bc.get('text') else '❌'}\n"
+    if bc.get('text'):
+        preview = bc['text'][:50] + '...' if len(bc['text']) > 50 else bc['text']
+        txt += f"   → {preview}\n"
     txt += f"📷 Фото: {'✅' if has_photo else '❌'}\n"
     txt += f"👥 Групп: {len(bc.get('groups', []))}\n"
+    if bc.get('groups'):
+        txt += f"   → {', '.join(bc['groups'][:3])}\n"
     txt += f"⏱ Интервал: {bc.get('interval', 30)} сек\n"
     txt += f"📨 Отправлено: {bc.get('sent', 0)}"
     
@@ -239,7 +231,14 @@ async def start(update: Update, context):
     uid = update.effective_user.id
     load_data()
     save_user(uid)
-    await main_menu(uid, context.bot, f"👋 Привет, {update.effective_user.first_name}!")
+    
+    welcome = f"👋 Привет, {update.effective_user.first_name}!"
+    if has_session_db(uid):
+        welcome += "\n\n✅ У вас есть сохранённая сессия Telegram\n🔄 Рассылки будут работать 24/7"
+    else:
+        welcome += "\n\n⚠️ Для запуска рассылок потребуется авторизация (один раз)"
+    
+    await main_menu(uid, context.bot, welcome)
 
 async def skip(update: Update, context):
     uid = update.effective_user.id
@@ -265,56 +264,109 @@ async def button_handler(update: Update, context):
     elif data == 'my_broadcasts':
         broadcasts = user_data[uid].get('broadcasts', [])
         if not broadcasts:
-            await send_msg(uid, context.bot, "📢 Нет рассылок", MAIN_MENU)
+            await send_msg(uid, context.bot, "📢 У вас нет рассылок\n\n➕ Создайте новую", MAIN_MENU)
             return
+        
         kb = []
         for i, bc in enumerate(broadcasts):
+            name = bc.get('name', f'Рассылка {i+1}')
             is_running = f"{uid}_{i}" in active_tasks and not active_tasks[f"{uid}_{i}"].done()
             status = "🟢" if is_running else "🔴"
-            kb.append([InlineKeyboardButton(f"{status} {bc['name']}", callback_data=f'select_{i}')])
+            kb.append([InlineKeyboardButton(f"{status} {name}", callback_data=f'select_{i}')])
+        kb.append([InlineKeyboardButton("➕ НОВАЯ", callback_data='new_broadcast')])
         kb.append([InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')])
-        await context.bot.send_message(uid, "📋 ВАШИ РАССЫЛКИ", reply_markup=InlineKeyboardMarkup(kb))
+        
+        await context.bot.send_message(uid, "📋 <b>ВАШИ РАССЫЛКИ</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     
     elif data == 'new_broadcast':
-        new_id = len(user_data[uid].get('broadcasts', []))
+        broadcasts = user_data[uid].get('broadcasts', [])
+        if len(broadcasts) >= 20:
+            await send_msg(uid, context.bot, "❌ Максимум 20 рассылок\nУдалите ненужные", MAIN_MENU)
+            return
+        
+        new_id = len(broadcasts)
         user_data[uid]['broadcasts'].append({
             'name': f'Рассылка {new_id+1}',
-            'text': None, 'groups': [], 'interval': 30,
-            'sent': 0, 'active': False
+            'text': None,
+            'groups': [],
+            'interval': 30,
+            'active': False,
+            'sent': 0,
+            'created_at': str(datetime.now())
         })
         save_data()
         await show_broadcast(uid, context.bot, new_id)
     
     elif data == 'my_groups':
         groups = user_data[uid].get('groups', [])
-        if groups:
-            await send_msg(uid, context.bot, "📁 ВАШИ ГРУППЫ\n\n" + "\n".join(groups), GROUPS_MENU)
+        if not groups:
+            await send_msg(uid, context.bot, "📁 У вас нет сохранённых групп", GROUPS_MENU)
         else:
-            await send_msg(uid, context.bot, "📁 Нет групп", GROUPS_MENU)
+            txt = f"📁 <b>ВАШИ ГРУППЫ ({len(groups)})</b>\n\n" + "\n".join([f"{i+1}. {g}" for i, g in enumerate(groups)])
+            await send_msg(uid, context.bot, txt, GROUPS_MENU)
     
     elif data == 'settings':
-        await send_msg(uid, context.bot, "⚙️ НАСТРОЙКИ\n\nСессия сохраняется и не требует перезапуска", SETTINGS_MENU)
+        await send_msg(uid, context.bot, "⚙️ <b>НАСТРОЙКИ</b>", SETTINGS_MENU)
     
     elif data == 'check_status':
-        broadcasts = user_data[uid].get('broadcasts', [])
         running = 0
-        for i in range(len(broadcasts)):
-            if f"{uid}_{i}" in active_tasks and not active_tasks[f"{uid}_{i}"].done():
+        for tk in active_tasks:
+            if tk.startswith(f"{uid}_") and not active_tasks[tk].done():
                 running += 1
-        has_session = uid in sessions
-        await send_msg(uid, context.bot, f"📊 СТАТУС\n\n🟢 Работает: {running}\n📢 Всего: {len(broadcasts)}\n🔐 Сессия: {'✅ Активна' if has_session else '❌ Нет'}\n\nБот работает 24/7 без перезапусков", SETTINGS_MENU)
+        has_sesh = has_session_db(uid)
+        await send_msg(uid, context.bot, f"📊 <b>СТАТУС</b>\n\n🟢 Работает рассылок: {running}\n🔐 Сессия: {'✅ Активна' if has_sesh else '❌ Нет'}\n\nБот работает 24/7 автоматически", SETTINGS_MENU)
     
     elif data == 'help_menu':
-        await send_msg(uid, context.bot, "❓ ПОМОЩЬ", HELP_MENU)
+        await send_msg(uid, context.bot, "❓ <b>ПОМОЩЬ</b>\n\nВыберите раздел:", HELP_MENU)
     
     elif data == 'help_quick':
-        await send_msg(uid, context.bot, "🚀 1. Новая рассылка\n2. Настрой текст/фото\n3. Настрой группы\n4. Запустить\n5. Авторизация\n\n✅ Работает 24/7 без перезапусков!", HELP_MENU)
+        txt = "🚀 <b>БЫСТРЫЙ СТАРТ</b>\n\n1️⃣ Нажми '➕ НОВАЯ РАССЫЛКА'\n2️⃣ Настрой ТЕКСТ или ФОТО\n3️⃣ Настрой ГРУППЫ\n4️⃣ Нажми '🚀 ЗАПУСТИТЬ'\n5️⃣ Введи номер телефона\n6️⃣ Введи КОД в формате: code12345\n\n✅ Рассылка работает 24/7!"
+        await send_msg(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_create':
-        await send_msg(uid, context.bot, "📝 ТЕКСТ: отправь сообщение\n📷 ФОТО: отправь фото (подпись = текст)\n👥 ГРУППЫ: @group1, @group2\n⏱ ИНТЕРВАЛ: 5-300 сек", HELP_MENU)
+        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>ТЕКСТ:</b> нажми '📝 ТЕКСТ' и отправь сообщение\n<b>ФОТО:</b> нажми '📷 ФОТО' и отправь фото (подпись = текст)\n<b>ГРУППЫ:</b> через запятую @group1, @group2\n<b>ИНТЕРВАЛ:</b> время между сообщениями (5-300 сек)"
+        await send_msg(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_errors':
-        await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал", HELP_MENU)
+        txt = "🔧 <b>ЧАСТЫЕ ОШИБКИ</b>\n\n<b>2FA:</b> введи пароль или /skip\n<b>Группа недоступна:</b> добавь бота в группу\n<b>Флуд:</b> увеличь интервал до 30+ сек\n<b>Неверный код:</b> Вводите строго в формате: code12345\n(Telegram не принимает просто цифры)"
+        await send_msg(uid, context.bot, txt, HELP_MENU)
+    
+    elif data == 'clear_session':
+        # Останавливаем все рассылки
+        for tk in list(active_tasks.keys()):
+            if tk.startswith(f"{uid}_"):
+                try:
+                    active_tasks[tk].cancel()
+                except:
+                    pass
+                await asyncio.sleep(0.3)
+                if tk in active_tasks:
+                    del active_tasks[tk]
+        
+        # Закрываем клиент
+        if uid in sessions:
+            try:
+                await sessions[uid].disconnect()
+            except:
+                pass
+            del sessions[uid]
+        
+        # Удаляем файлы сессии
+        session_file = get_session_path(uid)
+        if os.path.exists(session_file):
+            os.remove(session_file)
+        
+        # Удаляем из БД
+        delete_session_db(uid)
+        
+        # Очищаем данные
+        if uid in user_data:
+            user_data[uid]['sessions'] = {}
+            for bc in user_data[uid].get('broadcasts', []):
+                bc['active'] = False
+            save_data()
+        
+        await send_msg(uid, context.bot, "🗑 Сессия очищена\n✅ Все рассылки остановлены\n\nТеперь можно запустить рассылку заново", SETTINGS_MENU)
     
     elif data.startswith('select_'):
         bid = int(data.split('_')[1])
@@ -323,22 +375,22 @@ async def button_handler(update: Update, context):
     elif data.startswith('text_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'text', 'bid': bid}
-        await send_msg(uid, context.bot, "📝 Отправьте текст:", CANCEL_BTN)
+        await send_msg(uid, context.bot, "📝 Отправьте текст рассылки:", CANCEL_BTN)
     
     elif data.startswith('photo_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'photo', 'bid': bid}
-        await send_msg(uid, context.bot, "📷 Отправьте фото (подпись = текст):", CANCEL_BTN)
+        await send_msg(uid, context.bot, "📷 Отправьте фото\n\nПодпись к фото станет текстом сообщения", CANCEL_BTN)
     
     elif data.startswith('groups_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'groups', 'bid': bid}
-        await send_msg(uid, context.bot, "👥 Группы через запятую:\n@group1, @group2", CANCEL_BTN)
+        await send_msg(uid, context.bot, "👥 Введите группы через запятую:\n\nПример: @group1, @group2", CANCEL_BTN)
     
     elif data.startswith('interval_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'interval', 'bid': bid}
-        await send_msg(uid, context.bot, "⏱ Интервал (5-300 сек):", CANCEL_BTN)
+        await send_msg(uid, context.bot, "⏱ Введите интервал (5-300 секунд):", CANCEL_BTN)
     
     elif data.startswith('start_'):
         bid = int(data.split('_')[1])
@@ -346,16 +398,16 @@ async def button_handler(update: Update, context):
         has_photo = os.path.exists(get_media_path(uid, bid))
         
         if not bc.get('text') and not has_photo:
-            await send_msg(uid, context.bot, "❌ Нет текста или фото")
+            await send_msg(uid, context.bot, "❌ Сначала настройте ТЕКСТ или ФОТО")
             await show_broadcast(uid, context.bot, bid)
             return
         if not bc.get('groups'):
-            await send_msg(uid, context.bot, "❌ Нет групп")
+            await send_msg(uid, context.bot, "❌ Сначала настройте ГРУППЫ")
             await show_broadcast(uid, context.bot, bid)
             return
         
         if f"{uid}_{bid}" in active_tasks and not active_tasks[f"{uid}_{bid}"].done():
-            await send_msg(uid, context.bot, "⚠️ Уже запущена")
+            await send_msg(uid, context.bot, "⚠️ Рассылка уже запущена")
             await show_broadcast(uid, context.bot, bid)
             return
         
@@ -365,15 +417,16 @@ async def button_handler(update: Update, context):
             return
         
         user_states[uid] = {'step': 'auth', 'bid': bid}
-        await send_msg(uid, context.bot, "🔐 Номер телефона:\n+79123456789", CANCEL_BTN)
+        await send_msg(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789", CANCEL_BTN)
     
     elif data.startswith('stop_'):
         bid = int(data.split('_')[1])
-        task_key = f"{uid}_{bid}"
-        if task_key in active_tasks:
-            active_tasks[task_key].cancel()
-            if task_key in active_tasks:
-                del active_tasks[task_key]
+        tk = f"{uid}_{bid}"
+        if tk in active_tasks:
+            active_tasks[tk].cancel()
+            await asyncio.sleep(0.3)
+            if tk in active_tasks:
+                del active_tasks[tk]
             user_data[uid]['broadcasts'][bid]['active'] = False
             save_data()
             await send_msg(uid, context.bot, f"🛑 Рассылка #{bid+1} остановлена")
@@ -381,40 +434,49 @@ async def button_handler(update: Update, context):
     
     elif data.startswith('clone_'):
         bid = int(data.split('_')[1])
-        if len(user_data[uid]['broadcasts']) >= 10:
-            await send_msg(uid, context.bot, "❌ Максимум 10 рассылок", MAIN_MENU)
+        broadcasts = user_data[uid].get('broadcasts', [])
+        if len(broadcasts) >= 20:
+            await send_msg(uid, context.bot, "❌ Максимум 20 рассылок", MAIN_MENU)
             return
+        
         original = user_data[uid]['broadcasts'][bid]
         new_bc = {
             'name': f"Копия {original['name']}",
             'text': original.get('text'),
             'groups': original.get('groups', []).copy(),
             'interval': original.get('interval', 30),
-            'active': False, 'sent': 0
+            'active': False,
+            'sent': 0,
+            'created_at': str(datetime.now())
         }
         user_data[uid]['broadcasts'].append(new_bc)
+        
         old_media = get_media_path(uid, bid)
-        new_media = get_media_path(uid, len(user_data[uid]['broadcasts']) - 1)
+        new_media = get_media_path(uid, len(broadcasts))
         if os.path.exists(old_media):
             shutil.copy(old_media, new_media)
+        
         save_data()
-        await send_msg(uid, context.bot, "✅ Склонировано", MAIN_MENU)
+        await send_msg(uid, context.bot, "✅ Рассылка склонирована", MAIN_MENU)
     
     elif data.startswith('delete_'):
         bid = int(data.split('_')[1])
-        task_key = f"{uid}_{bid}"
-        if task_key in active_tasks:
-            active_tasks[task_key].cancel()
+        tk = f"{uid}_{bid}"
+        if tk in active_tasks:
+            active_tasks[tk].cancel()
+            await asyncio.sleep(0.3)
+            if tk in active_tasks:
+                del active_tasks[tk]
         media = get_media_path(uid, bid)
         if os.path.exists(media):
             os.remove(media)
         user_data[uid]['broadcasts'].pop(bid)
         save_data()
-        await send_msg(uid, context.bot, "🗑 Удалено", MAIN_MENU)
+        await send_msg(uid, context.bot, "🗑 Рассылка удалена", MAIN_MENU)
     
     elif data == 'add_group':
         user_states[uid] = {'step': 'add_group'}
-        await send_msg(uid, context.bot, "➕ Ссылка на группу:\n@group_name", CANCEL_BTN)
+        await send_msg(uid, context.bot, "➕ Введите ссылку на группу:\n@group_name", CANCEL_BTN)
     
     elif data == 'list_groups':
         groups = user_data[uid].get('groups', [])
@@ -455,7 +517,6 @@ async def start_broadcast(uid, bot, bid, client):
     media_path = get_media_path(uid, bid)
     has_photo = os.path.exists(media_path)
     
-    # Проверяем группы
     valid = []
     for g in groups:
         try:
@@ -465,23 +526,25 @@ async def start_broadcast(uid, bot, bid, client):
             await send_msg(uid, bot, f"⚠️ {g} - недоступна")
     
     if not valid:
-        await send_msg(uid, bot, "❌ Нет доступных групп")
+        await send_msg(uid, bot, "❌ Нет доступных групп!")
         return
     
     bc['groups'] = valid
     bc['active'] = True
     save_data()
     
-    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Рассылка будет работать без перезапусков!")
+    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\n\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Сессия сохранится автоматически!")
     
-    task = asyncio.create_task(run_broadcast(uid, bid, client, valid, text, interval, media_path, has_photo, bot))
-    active_tasks[f"{uid}_{bid}"] = task
+    tk = f"{uid}_{bid}"
+    task = asyncio.create_task(run_broadcast(uid, bid, client, valid, text, interval, media_path, has_photo))
+    active_tasks[tk] = task
     
-    # Запускаем пинг для поддержания сессии
-    asyncio.create_task(keep_alive(uid, bot))
+    # Запускаем keep-alive для поддержания сессии
+    asyncio.create_task(keep_alive_loop(uid))
 
-async def run_broadcast(uid, bid, client, groups, text, interval, media_path, has_photo, bot):
+async def run_broadcast(uid, bid, client, groups, text, interval, media_path, has_photo):
     sent = user_data[uid]['broadcasts'][bid].get('sent', 0)
+    consecutive_errors = 0
     
     try:
         while True:
@@ -496,12 +559,22 @@ async def run_broadcast(uid, bid, client, groups, text, interval, media_path, ha
                     user_data[uid]['broadcasts'][bid]['sent'] = sent
                     user_data[uid]['total_sent'] = user_data[uid].get('total_sent', 0) + 1
                     save_data()
+                    consecutive_errors = 0
                     
                 except FloodWaitError as e:
-                    await asyncio.sleep(e.seconds)
-                except Exception as e:
-                    print(f"Ошибка {uid}: {e}")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(min(e.seconds, 60))
+                except (AuthKeyError, ConnectionError, RPCError) as e:
+                    consecutive_errors += 1
+                    if consecutive_errors >= 3:
+                        # Пытаемся восстановить клиент
+                        new_client = await get_client(uid)
+                        if new_client:
+                            client = new_client
+                            consecutive_errors = 0
+                            print(f"[RECOVERY] Клиент восстановлен для {uid}")
+                    await asyncio.sleep(10)
+                except:
+                    pass
                 
                 await asyncio.sleep(interval)
     except asyncio.CancelledError:
@@ -511,8 +584,7 @@ async def run_broadcast(uid, bid, client, groups, text, interval, media_path, ha
 # ==================== ОБРАБОТЧИК ====================
 async def message_handler(update: Update, context):
     uid = update.effective_user.id
-    if uid not in user_data:
-        save_user(uid)
+    save_user(uid)
     
     step_data = user_states.get(uid, {})
     step = step_data.get('step')
@@ -522,6 +594,8 @@ async def message_handler(update: Update, context):
         return
     
     if step == 'add_group':
+        if not update.message.text:
+            return
         text = update.message.text.strip()
         g = text.replace('https://t.me/', '@').replace('t.me/', '@')
         if not g.startswith('@'):
@@ -531,10 +605,12 @@ async def message_handler(update: Update, context):
             groups.append(g)
             user_data[uid]['groups'] = groups
             save_data()
-            await send_msg(uid, context.bot, f"✅ {g} добавлена", GROUPS_MENU)
+            await send_msg(uid, context.bot, f"✅ Группа {g} добавлена", GROUPS_MENU)
         del user_states[uid]
     
     elif step == 'text':
+        if not update.message.text:
+            return
         bid = step_data['bid']
         text = update.message.text.strip()
         user_data[uid]['broadcasts'][bid]['text'] = text
@@ -547,9 +623,9 @@ async def message_handler(update: Update, context):
         bid = step_data['bid']
         if update.message.photo:
             photo = update.message.photo[-1]
-            media_path = get_media_path(uid, bid)
+            path = get_media_path(uid, bid)
             file = await context.bot.get_file(photo.file_id)
-            await file.download_to_drive(media_path)
+            await file.download_to_drive(path)
             if update.message.caption:
                 user_data[uid]['broadcasts'][bid]['text'] = update.message.caption.strip()
                 save_data()
@@ -561,6 +637,8 @@ async def message_handler(update: Update, context):
         await show_broadcast(uid, context.bot, bid)
     
     elif step == 'groups':
+        if not update.message.text:
+            return
         bid = step_data['bid']
         raw = [g.strip() for g in update.message.text.split(',') if g.strip()]
         groups = []
@@ -572,11 +650,13 @@ async def message_handler(update: Update, context):
         if groups:
             user_data[uid]['broadcasts'][bid]['groups'] = groups
             save_data()
-            await send_msg(uid, context.bot, f"✅ {len(groups)} групп")
+            await send_msg(uid, context.bot, f"✅ Сохранено {len(groups)} групп")
         del user_states[uid]
         await show_broadcast(uid, context.bot, bid)
     
     elif step == 'interval':
+        if not update.message.text:
+            return
         bid = step_data['bid']
         try:
             val = int(update.message.text.strip())
@@ -594,12 +674,15 @@ async def message_handler(update: Update, context):
         await show_broadcast(uid, context.bot, bid)
     
     elif step == 'auth':
+        if not update.message.text:
+            return
+        bid = step_data['bid']
         phone = update.message.text.strip()
         if not phone.startswith('+'):
             await send_msg(uid, context.bot, "❌ Формат: +79123456789", CANCEL_BTN)
             return
         
-        user_states[uid] = {'step': 'code', 'bid': step_data['bid'], 'phone': phone}
+        user_states[uid] = {'step': 'code', 'bid': bid, 'phone': phone}
         
         session_file = get_session_path(uid)
         client = TelegramClient(session_file, API_ID, API_HASH)
@@ -608,27 +691,37 @@ async def message_handler(update: Update, context):
         try:
             await client.connect()
             await client.send_code_request(phone)
-            await send_msg(uid, context.bot, "📲 Код: code12345", CANCEL_BTN)
+            await send_msg(uid, context.bot, "📲 Введите КОД из Telegram:\n\nПРАВИЛЬНЫЙ ФОРМАТ: code12345\n(где 12345 - цифры из сообщения)\n\n⚠️ Если ввести просто 12345 - Telegram отклонит код и сессия не сохранится!", CANCEL_BTN)
         except Exception as e:
-            await send_msg(uid, context.bot, f"❌ {str(e)[:100]}", MAIN_MENU)
+            await send_msg(uid, context.bot, f"❌ Ошибка: {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
     
     elif step == 'code':
-        match = re.search(r'(\d{5,6})', update.message.text.strip())
-        code = match.group(1) if match else None
-        if not code:
-            await send_msg(uid, context.bot, "❌ Формат: code12345", CANCEL_BTN)
+        if not update.message.text:
+            return
+        text = update.message.text.strip().lower()
+        
+        # Проверяем правильный формат
+        if not text.startswith('code'):
+            await send_msg(uid, context.bot, "❌ НЕВЕРНЫЙ ФОРМАТ!\n\nTelegram НЕ принимает код без буквы 'code'!\n\n✅ Правильный формат: code12345\n(где 12345 - цифры из Telegram)\n\nПожалуйста, введите код заново в правильном формате:", CANCEL_BTN)
+            return
+        
+        code = text[4:]
+        if not code.isdigit():
+            await send_msg(uid, context.bot, "❌ НЕВЕРНЫЙ ФОРМАТ!\n\nПосле 'code' должны идти только цифры!\n\nПример: code12345", CANCEL_BTN)
             return
         
         user_states[uid]['code'] = code
         user_states[uid]['step'] = '2fa'
-        await send_msg(uid, context.bot, "🔐 Пароль 2FA или /skip", CANCEL_BTN)
+        await send_msg(uid, context.bot, "🔐 Пароль 2FA (если есть) или /skip", CANCEL_BTN)
     
     elif step == '2fa':
+        if not update.message.text:
+            return
         password = None if update.message.text.strip() == '/skip' else update.message.text.strip()
         client = sessions.get(uid)
         if not client:
-            await send_msg(uid, context.bot, "❌ Ошибка", MAIN_MENU)
+            await send_msg(uid, context.bot, "❌ Ошибка сессии", MAIN_MENU)
             del user_states[uid]
             return
         
@@ -640,21 +733,24 @@ async def message_handler(update: Update, context):
             await client.sign_in(phone, code=code)
         except SessionPasswordNeededError:
             if not password:
-                await send_msg(uid, context.bot, "🔐 Введите пароль:", CANCEL_BTN)
+                await send_msg(uid, context.bot, "🔐 Введите пароль 2FA:", CANCEL_BTN)
                 return
             try:
                 await client.sign_in(password=password)
             except:
                 await send_msg(uid, context.bot, "❌ Неверный пароль", CANCEL_BTN)
                 return
+        except PhoneCodeInvalidError:
+            await send_msg(uid, context.bot, "❌ НЕВЕРНЫЙ КОД!\n\nКод должен быть в формате: code12345\nПожалуйста, начните авторизацию заново.", MAIN_MENU)
+            del user_states[uid]
+            return
         except Exception as e:
-            await send_msg(uid, context.bot, f"❌ {str(e)[:100]}", MAIN_MENU)
+            await send_msg(uid, context.bot, f"❌ Ошибка: {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
             return
         
-        user_data[uid]['sessions'] = {'phone': phone, 'is_authorized': True}
-        save_data()
-        
+        # Сохраняем сессию
+        save_session_db(uid, phone)
         await start_broadcast(uid, context.bot, bid, client)
         del user_states[uid]
 
@@ -699,13 +795,15 @@ async def run():
     
     await bot_app.bot.set_webhook(f"{RENDER_URL}/webhook/{BOT_TOKEN}")
     
-    print("=" * 50)
-    print("✅ БОТ ЗАПУЩЕН")
-    print("=" * 50)
-    print("📝 ТЕКСТ + ФОТО")
-    print("🔄 РАБОТАЕТ 24/7 БЕЗ ПЕРЕЗАПУСКОВ")
-    print("🔐 СЕССИЯ ПОДДЕРЖИВАЕТСЯ ПИНГОМ КАЖДЫЕ 5 МИНУТ")
-    print("=" * 50)
+    print("=" * 60)
+    print("✅ SENDFLOW БОТ ЗАПУЩЕН")
+    print("=" * 60)
+    print("📝 ТЕКСТ + ФОТО - полная поддержка")
+    print("🔐 СЕССИИ СОХРАНЯЮТСЯ В SQLite")
+    print("🔄 KEEP-ALIVE КАЖДЫЕ 5 МИНУТ")
+    print("🚀 24/7 РАБОТА БЕЗ ПЕРЕЗАПУСКОВ")
+    print("📌 КОД ТОЛЬКО В ФОРМАТЕ: code12345")
+    print("=" * 60)
     
     await start_server()
 
