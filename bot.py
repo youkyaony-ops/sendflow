@@ -18,7 +18,8 @@ from telethon.errors import (
     ChannelPrivateError,
     UserBannedInChannelError
 )
-from telethon.tl.functions.messages import JoinChannelRequest, ImportChatInviteRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.tl.functions.channels import JoinChannelRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from aiohttp import web
@@ -324,7 +325,7 @@ async def send_with_subscribe_check(uid, bid, client, group, text, bot):
             
             if 'need to join' in error_msg or 'subscribe' in error_msg or 'write forbidden' in error_msg:
                 try:
-                    channels = parse_required_subscriptions(error_msg)
+                    channels = await parse_required_subscriptions(error_msg)
                     
                     if channels:
                         results = await auto_subscribe_to_channels(client, channels)
