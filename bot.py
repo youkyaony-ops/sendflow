@@ -8,7 +8,17 @@ import shutil
 import sqlite3
 from datetime import datetime
 from telethon import TelegramClient, errors
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError, AuthKeyError, RPCError
+from telethon.errors import (
+    SessionPasswordNeededError, 
+    PhoneCodeInvalidError, 
+    FloodWaitError, 
+    AuthKeyError, 
+    RPCError,
+    ChatWriteForbiddenError,
+    ChannelPrivateError,
+    UserBannedInChannelError
+)
+from telethon.tl.functions.messages import JoinChannelRequest, ImportChatInviteRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from aiohttp import web
@@ -109,7 +119,6 @@ def get_session_path(uid):
 
 # ==================== КЛИЕНТ И KEEP-ALIVE ====================
 async def get_client(uid):
-    """Получение клиента с автоматическим восстановлением"""
     if uid in sessions:
         try:
             await sessions[uid].get_me()
@@ -138,7 +147,6 @@ async def get_client(uid):
     return None
 
 async def keep_alive_loop(uid):
-    """Пинг каждые 5 минут для поддержания сессии живой"""
     while True:
         await asyncio.sleep(300)
         if uid in sessions:
@@ -148,10 +156,215 @@ async def keep_alive_loop(uid):
                 print(f"[KEEP_ALIVE] Пинг для {uid} успешен")
             except Exception as e:
                 print(f"[KEEP_ALIVE] Ошибка для {uid}: {e}")
-                # Пытаемся восстановить клиент
                 await get_client(uid)
 
-# ==================== КЛАВИАТУРЫ ====================
+# ==================== НОВЫЕ ФУНКЦИИ ====================
+
+async def resolve_invite_list(link: str, client) -> list:
+    """
+    Получает список групп из invite-ссылки вида https://t.me/addlist/...
+    """
+    groups = []
+    try:
+        if 'addlist' in link:
+            hash_part = link.split('/')[-1].split('?')[0]
+            updates = await client(ImportChatInviteRequest(hash_part))
+            if hasattr(updates, 'chats') and updates.chats:
+                for chat in updates.chats:
+                    if hasattr(chat, 'username') and chat.username:
+                        groups.append(f'@{chat.username}')
+                    elif hasattr(chat, 'id'):
+                        groups.append(str(chat.id))
+        return groups
+    except Exception as e:
+        print(f"Ошибка парсинга invite list: {e}")
+        return []
+
+async def auto_subscribe_to_channels(client, required_channels: list) -> dict:
+    """
+    Автоматическая подписка на каналы
+    """
+    results = {'success': [], 'failed': []}
+    
+    for channel in required_channels:
+        try:
+            channel = channel.strip()
+            if 't.me/' in channel:
+                channel = channel.split('t.me/')[-1]
+                if '?' in channel:
+                    channel = channel.split('?')[0]
+            if not channel.startswith('@'):
+                channel = '@' + channel
+            
+            await client(JoinChannelRequest(channel))
+            results['success'].append(channel)
+            print(f"[SUBSCRIBE] Подписался на {channel}")
+            await asyncio.sleep(1)
+            
+        except FloodWaitError as e:
+            await asyncio.sleep(e.seconds)
+            try:
+                await client(JoinChannelRequest(channel))
+                results['success'].append(channel)
+            except:
+                results['failed'].append(channel)
+        except Exception as e:
+            results['failed'].append(channel)
+            print(f"[SUBSCRIBE] Ошибка подписки на {channel}: {e}")
+    
+    return results
+
+async def parse_required_subscriptions(text: str) -> list:
+    """
+    Извлекает ссылки на каналы из текста сообщения об ошибке
+    """
+    channels = []
+    
+    patterns = [
+        r'@([a-zA-Z0-9_]{5,32})',
+        r't\.me/([a-zA-Z0-9_]{5,32})',
+        r'https?://t\.me/([a-zA-Z0-9_]{5,32})',
+        r'на каналы?:?\s*([@a-zA-Z0-9_|,\s]+)',
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        for match in matches:
+            if isinstance(match, tuple):
+                match = match[0]
+            clean_match = match.replace('|', ' ').replace(',', ' ').strip()
+            for part in clean_match.split():
+                part = part.strip()
+                if part.startswith('@'):
+                    channels.append(part)
+                elif re.match(r'^[a-zA-Z0-9_]{5,32}$', part):
+                    channels.append(f'@{part}')
+    
+    channels = list(dict.fromkeys(channels))
+    return channels
+
+async def add_groups_from_invite(uid, bot, link, bid):
+    """
+    Добавляет группы из invite-ссылки в рассылку
+    """
+    client = await get_client(uid)
+    if not client:
+        await bot.send_message(uid, "❌ Нет активной сессии. Сначала запустите рассылку или авторизуйтесь.")
+        return False
+    
+    await bot.send_message(uid, f"🔄 Обработка ссылки: {link}")
+    
+    try:
+        groups = []
+        
+        if 'addlist' in link:
+            groups = await resolve_invite_list(link, client)
+            if not groups:
+                await bot.send_message(uid, "❌ Не удалось получить группы из addlist-ссылки. Возможно, ссылка недействительна.")
+                return False
+                
+        elif 'joinchat' in link or '/+' in link:
+            try:
+                hash_part = link.split('/')[-1].split('?')[0]
+                updates = await client(ImportChatInviteRequest(hash_part))
+                if hasattr(updates, 'chats') and updates.chats:
+                    for chat in updates.chats:
+                        if hasattr(chat, 'username') and chat.username:
+                            groups.append(f'@{chat.username}')
+                        elif hasattr(chat, 'id'):
+                            groups.append(str(chat.id))
+            except Exception as e:
+                await bot.send_message(uid, f"❌ Ошибка вступления по ссылке: {str(e)[:100]}")
+                return False
+                
+        else:
+            group = link.replace('https://t.me/', '@').replace('t.me/', '@')
+            if not group.startswith('@'):
+                group = '@' + group
+            groups = [group]
+        
+        if not groups:
+            await bot.send_message(uid, "❌ Не удалось получить группы из ссылки")
+            return False
+        
+        current_groups = user_data[uid]['broadcasts'][bid].get('groups', [])
+        new_groups = list(set(current_groups + groups))
+        user_data[uid]['broadcasts'][bid]['groups'] = new_groups
+        save_data()
+        
+        await bot.send_message(uid, f"✅ Добавлено {len(groups)} групп из ссылки\n\nВсего групп: {len(new_groups)}")
+        
+        group_list = "\n".join(groups[:10])
+        if len(groups) > 10:
+            group_list += f"\n... и ещё {len(groups)-10}"
+        await bot.send_message(uid, f"📋 Добавленные группы:\n{group_list}")
+        
+        return True
+        
+    except Exception as e:
+        await bot.send_message(uid, f"❌ Ошибка: {str(e)[:200]}")
+        return False
+
+async def send_with_subscribe_check(uid, bid, client, group, text, bot):
+    """
+    Отправляет сообщение в группу, если нужно - подписывается на каналы
+    """
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            await client.send_message(group, text)
+            return True, "Отправлено"
+            
+        except FloodWaitError as e:
+            await asyncio.sleep(e.seconds)
+            continue
+            
+        except (ChatWriteForbiddenError, ChannelPrivateError, UserBannedInChannelError) as e:
+            error_msg = str(e).lower()
+            
+            if 'need to join' in error_msg or 'subscribe' in error_msg or 'write forbidden' in error_msg:
+                try:
+                    channels = parse_required_subscriptions(error_msg)
+                    
+                    if channels:
+                        results = await auto_subscribe_to_channels(client, channels)
+                        
+                        if results['success']:
+                            await bot.send_message(uid, f"✅ Автоматически подписался на каналы:\n" + "\n".join(results['success']))
+                            try:
+                                await client.send_message(group, text)
+                                return True, "Отправлено после подписки"
+                            except Exception as send_err:
+                                return False, f"Не удалось отправить после подписки: {str(send_err)[:50]}"
+                        else:
+                            await bot.send_message(uid, f"❌ Не удалось подписаться на каналы:\n" + "\n".join(results['failed']))
+                            return False, "Требуется ручная подписка"
+                    else:
+                        return False, "Требуется подписка, но каналы не найдены"
+                        
+                except Exception as sub_err:
+                    return False, f"Ошибка при проверке подписки: {str(sub_err)[:50]}"
+            else:
+                return False, str(e)[:100]
+                
+        except Exception as e:
+            if attempt == max_retries - 1:
+                return False, str(e)[:100]
+            await asyncio.sleep(2)
+    
+    return False, "Превышено количество попыток"
+
+# ==================== ОБНОВЛЕННЫЕ КЛАВИАТУРЫ ====================
+
+def get_broadcast_actions(bid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 ТЕКСТ", callback_data=f'text_{bid}'), InlineKeyboardButton("📷 ФОТО", callback_data=f'photo_{bid}')],
+        [InlineKeyboardButton("👥 ГРУППЫ", callback_data=f'groups_{bid}'), InlineKeyboardButton("📎 ADD LIST", callback_data=f'invite_{bid}')],
+        [InlineKeyboardButton("⏱ ИНТЕРВАЛ", callback_data=f'interval_{bid}'), InlineKeyboardButton("🚀 ЗАПУСТИТЬ", callback_data=f'start_{bid}')],
+        [InlineKeyboardButton("⏹️ ОСТАНОВИТЬ", callback_data=f'stop_{bid}'), InlineKeyboardButton("📎 КЛОНИРОВАТЬ", callback_data=f'clone_{bid}')],
+        [InlineKeyboardButton("🗑 УДАЛИТЬ", callback_data=f'delete_{bid}'), InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]
+    ])
+
 MAIN_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("📢 МОИ РАССЫЛКИ", callback_data='my_broadcasts')],
     [InlineKeyboardButton("➕ НОВАЯ РАССЫЛКА", callback_data='new_broadcast')],
@@ -159,15 +372,6 @@ MAIN_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("⚙️ НАСТРОЙКИ", callback_data='settings')],
     [InlineKeyboardButton("❓ ПОМОЩЬ", callback_data='help_menu')]
 ])
-
-def get_broadcast_actions(bid):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 ТЕКСТ", callback_data=f'text_{bid}'), InlineKeyboardButton("📷 ФОТО", callback_data=f'photo_{bid}')],
-        [InlineKeyboardButton("👥 ГРУППЫ", callback_data=f'groups_{bid}'), InlineKeyboardButton("⏱ ИНТЕРВАЛ", callback_data=f'interval_{bid}')],
-        [InlineKeyboardButton("🚀 ЗАПУСТИТЬ", callback_data=f'start_{bid}'), InlineKeyboardButton("⏹️ ОСТАНОВИТЬ", callback_data=f'stop_{bid}')],
-        [InlineKeyboardButton("📎 КЛОНИРОВАТЬ", callback_data=f'clone_{bid}'), InlineKeyboardButton("🗑 УДАЛИТЬ", callback_data=f'delete_{bid}')],
-        [InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]
-    ])
 
 GROUPS_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("➕ ДОБАВИТЬ ГРУППУ", callback_data='add_group')],
@@ -186,6 +390,7 @@ HELP_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("🚀 БЫСТРЫЙ СТАРТ", callback_data='help_quick')],
     [InlineKeyboardButton("📢 КАК СОЗДАТЬ", callback_data='help_create')],
     [InlineKeyboardButton("🔧 ОШИБКИ", callback_data='help_errors')],
+    [InlineKeyboardButton("📎 ADD LIST", callback_data='help_invite')],
     [InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]
 ])
 
@@ -324,15 +529,18 @@ async def button_handler(update: Update, context):
         await send_msg(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_create':
-        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>ТЕКСТ:</b> нажми '📝 ТЕКСТ' и отправь сообщение\n<b>ФОТО:</b> нажми '📷 ФОТО' и отправь фото (подпись = текст)\n<b>ГРУППЫ:</b> через запятую @group1, @group2\n<b>ИНТЕРВАЛ:</b> время между сообщениями (5-300 сек)"
+        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>ТЕКСТ:</b> нажми '📝 ТЕКСТ' и отправь сообщение\n<b>ФОТО:</b> нажми '📷 ФОТО' и отправь фото (подпись = текст)\n<b>ГРУППЫ:</b> через запятую @group1, @group2 или через кнопку ADD LIST\n<b>ИНТЕРВАЛ:</b> время между сообщениями (5-300 сек)"
         await send_msg(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_errors':
-        txt = "🔧 <b>ЧАСТЫЕ ОШИБКИ</b>\n\n<b>2FA:</b> введи пароль или /skip\n<b>Группа недоступна:</b> добавь бота в группу\n<b>Флуд:</b> увеличь интервал до 30+ сек\n<b>Неверный код:</b> Вводите строго в формате: code12345\n(Telegram не принимает просто цифры)"
+        txt = "🔧 <b>ЧАСТЫЕ ОШИБКИ</b>\n\n<b>2FA:</b> введи пароль или /skip\n<b>Группа недоступна:</b> добавь бота в группу\n<b>Флуд:</b> увеличь интервал до 30+ сек\n<b>Неверный код:</b> Вводите строго в формате: code12345"
+        await send_msg(uid, context.bot, txt, HELP_MENU)
+    
+    elif data == 'help_invite':
+        txt = "📎 <b>ADD LIST - ИНСТРУКЦИЯ</b>\n\n<b>Что это?</b>\nКнопка позволяет добавить сразу несколько групп по одной ссылке.\n\n<b>Поддерживаемые форматы:</b>\n• https://t.me/addlist/xxxxx (список групп)\n• https://t.me/joinchat/xxxxx\n• https://t.me/+xxxxx\n\n<b>Как использовать:</b>\n1. Нажми '📎 ADD LIST'\n2. Вставь ссылку-приглашение\n3. Бот автоматически добавит все группы из списка\n\n<b>Авто-подписка:</b>\nЕсли чат требует подписки на каналы, бот подпишется автоматически!"
         await send_msg(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'clear_session':
-        # Останавливаем все рассылки
         for tk in list(active_tasks.keys()):
             if tk.startswith(f"{uid}_"):
                 try:
@@ -343,7 +551,6 @@ async def button_handler(update: Update, context):
                 if tk in active_tasks:
                     del active_tasks[tk]
         
-        # Закрываем клиент
         if uid in sessions:
             try:
                 await sessions[uid].disconnect()
@@ -351,15 +558,12 @@ async def button_handler(update: Update, context):
                 pass
             del sessions[uid]
         
-        # Удаляем файлы сессии
         session_file = get_session_path(uid)
         if os.path.exists(session_file):
             os.remove(session_file)
         
-        # Удаляем из БД
         delete_session_db(uid)
         
-        # Очищаем данные
         if uid in user_data:
             user_data[uid]['sessions'] = {}
             for bc in user_data[uid].get('broadcasts', []):
@@ -385,7 +589,12 @@ async def button_handler(update: Update, context):
     elif data.startswith('groups_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'groups', 'bid': bid}
-        await send_msg(uid, context.bot, "👥 Введите группы через запятую:\n\nПример: @group1, @group2", CANCEL_BTN)
+        await send_msg(uid, context.bot, "👥 Введите группы через запятую:\n\nПример: @group1, @group2\n\nИли используйте кнопку ADD LIST для массового добавления", CANCEL_BTN)
+    
+    elif data.startswith('invite_'):
+        bid = int(data.split('_')[1])
+        user_states[uid] = {'step': 'invite', 'bid': bid}
+        await send_msg(uid, context.bot, "📎 Вставьте ссылку-приглашение:\n\nПоддерживаются форматы:\n• https://t.me/addlist/xxxxx (список групп)\n• https://t.me/joinchat/xxxxx\n• https://t.me/+xxxxx\n• https://t.me/groupname", CANCEL_BTN)
     
     elif data.startswith('interval_'):
         bid = int(data.split('_')[1])
@@ -533,16 +742,15 @@ async def start_broadcast(uid, bot, bid, client):
     bc['active'] = True
     save_data()
     
-    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\n\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Сессия сохранится автоматически!")
+    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\n\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Будет автоматически подписываться на каналы при необходимости!")
     
     tk = f"{uid}_{bid}"
-    task = asyncio.create_task(run_broadcast(uid, bid, client, valid, text, interval, media_path, has_photo))
+    task = asyncio.create_task(run_broadcast(uid, bid, client, valid, text, interval, media_path, has_photo, bot))
     active_tasks[tk] = task
     
-    # Запускаем keep-alive для поддержания сессии
     asyncio.create_task(keep_alive_loop(uid))
 
-async def run_broadcast(uid, bid, client, groups, text, interval, media_path, has_photo):
+async def run_broadcast(uid, bid, client, groups, text, interval, media_path, has_photo, bot):
     sent = user_data[uid]['broadcasts'][bid].get('sent', 0)
     consecutive_errors = 0
     
@@ -553,7 +761,10 @@ async def run_broadcast(uid, bid, client, groups, text, interval, media_path, ha
                     if has_photo and os.path.exists(media_path):
                         await client.send_file(group, media_path, caption=text)
                     else:
-                        await client.send_message(group, text)
+                        success, result = await send_with_subscribe_check(uid, bid, client, group, text, bot)
+                        if not success:
+                            await bot.send_message(uid, f"⚠️ {group}: {result}")
+                            continue
                     
                     sent += 1
                     user_data[uid]['broadcasts'][bid]['sent'] = sent
@@ -566,20 +777,21 @@ async def run_broadcast(uid, bid, client, groups, text, interval, media_path, ha
                 except (AuthKeyError, ConnectionError, RPCError) as e:
                     consecutive_errors += 1
                     if consecutive_errors >= 3:
-                        # Пытаемся восстановить клиент
                         new_client = await get_client(uid)
                         if new_client:
                             client = new_client
                             consecutive_errors = 0
                             print(f"[RECOVERY] Клиент восстановлен для {uid}")
                     await asyncio.sleep(10)
-                except:
-                    pass
+                except Exception as e:
+                    print(f"[ERROR] {uid}: {e}")
+                    await asyncio.sleep(5)
                 
                 await asyncio.sleep(interval)
     except asyncio.CancelledError:
         user_data[uid]['broadcasts'][bid]['active'] = False
         save_data()
+        print(f"[STOP] Рассылка #{bid+1} для {uid} остановлена")
 
 # ==================== ОБРАБОТЧИК ====================
 async def message_handler(update: Update, context):
@@ -613,6 +825,9 @@ async def message_handler(update: Update, context):
             return
         bid = step_data['bid']
         text = update.message.text.strip()
+        if len(text) > 4096:
+            await send_msg(uid, context.bot, "❌ Текст слишком длинный", CANCEL_BTN)
+            return
         user_data[uid]['broadcasts'][bid]['text'] = text
         save_data()
         await send_msg(uid, context.bot, "✅ Текст сохранён")
@@ -651,6 +866,18 @@ async def message_handler(update: Update, context):
             user_data[uid]['broadcasts'][bid]['groups'] = groups
             save_data()
             await send_msg(uid, context.bot, f"✅ Сохранено {len(groups)} групп")
+        else:
+            await send_msg(uid, context.bot, "❌ Не найдено групп", CANCEL_BTN)
+            return
+        del user_states[uid]
+        await show_broadcast(uid, context.bot, bid)
+    
+    elif step == 'invite':
+        if not update.message.text:
+            return
+        bid = step_data['bid']
+        link = update.message.text.strip()
+        await add_groups_from_invite(uid, context.bot, link, bid)
         del user_states[uid]
         await show_broadcast(uid, context.bot, bid)
     
@@ -691,7 +918,7 @@ async def message_handler(update: Update, context):
         try:
             await client.connect()
             await client.send_code_request(phone)
-            await send_msg(uid, context.bot, "📲 Введите КОД из Telegram:\n\nПРАВИЛЬНЫЙ ФОРМАТ: code12345\n(где 12345 - цифры из сообщения)\n\n⚠️ Если ввести просто 12345 - Telegram отклонит код и сессия не сохранится!", CANCEL_BTN)
+            await send_msg(uid, context.bot, "📲 Введите КОД из Telegram:\n\nПРАВИЛЬНЫЙ ФОРМАТ: code12345\n(где 12345 - цифры из сообщения)\n\n⚠️ Если ввести просто 12345 - Telegram отклонит код!", CANCEL_BTN)
         except Exception as e:
             await send_msg(uid, context.bot, f"❌ Ошибка: {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
@@ -701,9 +928,8 @@ async def message_handler(update: Update, context):
             return
         text = update.message.text.strip().lower()
         
-        # Проверяем правильный формат
         if not text.startswith('code'):
-            await send_msg(uid, context.bot, "❌ НЕВЕРНЫЙ ФОРМАТ!\n\nTelegram НЕ принимает код без буквы 'code'!\n\n✅ Правильный формат: code12345\n(где 12345 - цифры из Telegram)\n\nПожалуйста, введите код заново в правильном формате:", CANCEL_BTN)
+            await send_msg(uid, context.bot, "❌ НЕВЕРНЫЙ ФОРМАТ!\n\nTelegram НЕ принимает код без буквы 'code'!\n\n✅ Правильный формат: code12345\n(где 12345 - цифры из Telegram)", CANCEL_BTN)
             return
         
         code = text[4:]
@@ -749,7 +975,6 @@ async def message_handler(update: Update, context):
             del user_states[uid]
             return
         
-        # Сохраняем сессию
         save_session_db(uid, phone)
         await start_broadcast(uid, context.bot, bid, client)
         del user_states[uid]
@@ -799,10 +1024,10 @@ async def run():
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
     print("=" * 60)
     print("📝 ТЕКСТ + ФОТО - полная поддержка")
+    print("📎 ADD LIST - массовое добавление групп")
+    print("🔄 АВТО-ПОДПИСКА на каналы")
     print("🔐 СЕССИИ СОХРАНЯЮТСЯ В SQLite")
-    print("🔄 KEEP-ALIVE КАЖДЫЕ 5 МИНУТ")
     print("🚀 24/7 РАБОТА БЕЗ ПЕРЕЗАПУСКОВ")
-    print("📌 КОД ТОЛЬКО В ФОРМАТЕ: code12345")
     print("=" * 60)
     
     await start_server()
