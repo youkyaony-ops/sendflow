@@ -43,44 +43,55 @@ active_tasks = {}
 sessions = {}
 user_states = {}
 
-# ==================== SQLite ДЛЯ СЕССИЙ (ИСПРАВЛЕНО) ====================
-def adapt_datetime(dt):
-    return dt.isoformat()
-
-def convert_datetime(s):
-    return datetime.fromisoformat(s.decode())
-
-sqlite3.register_adapter(datetime, adapt_datetime)
-sqlite3.register_converter("timestamp", convert_datetime)
-
-conn = sqlite3.connect(os.path.join(SESSIONS_DIR, 'sessions.db'), detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS sessions (
-        user_id INTEGER PRIMARY KEY,
-        phone TEXT,
-        created_at TIMESTAMP,
-        last_ping TIMESTAMP
-    )
-''')
-conn.commit()
-
+# ==================== ПРОСТОЕ ХРАНЕНИЕ СЕССИЙ ====================
 def save_session_db(user_id, phone):
-    cursor.execute('INSERT OR REPLACE INTO sessions (user_id, phone, created_at, last_ping) VALUES (?, ?, ?, ?)',
-                   (user_id, phone, datetime.now(), datetime.now()))
-    conn.commit()
+    try:
+        data = {
+            'phone': phone,
+            'is_authorized': True,
+            'created_at': str(datetime.now()),
+            'last_used': str(datetime.now())
+        }
+        with open(os.path.join(SESSIONS_DIR, f'session_{user_id}.json'), 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except:
+        return False
 
 def update_ping_db(user_id):
-    cursor.execute('UPDATE sessions SET last_ping = ? WHERE user_id = ?', (datetime.now(), user_id))
-    conn.commit()
+    try:
+        file_path = os.path.join(SESSIONS_DIR, f'session_{user_id}.json')
+        if os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            data['last_used'] = str(datetime.now())
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+    except:
+        pass
 
 def delete_session_db(user_id):
-    cursor.execute('DELETE FROM sessions WHERE user_id = ?', (user_id,))
-    conn.commit()
+    try:
+        file_path = os.path.join(SESSIONS_DIR, f'session_{user_id}.json')
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        session_file = os.path.join(SESSIONS_DIR, f'session_{user_id}.session')
+        if os.path.exists(session_file):
+            os.remove(session_file)
+    except:
+        pass
 
 def has_session_db(user_id):
-    cursor.execute('SELECT user_id FROM sessions WHERE user_id = ?', (user_id,))
-    return cursor.fetchone() is not None
+    file_path = os.path.join(SESSIONS_DIR, f'session_{user_id}.json')
+    session_file = os.path.join(SESSIONS_DIR, f'session_{user_id}.session')
+    if os.path.exists(file_path) and os.path.exists(session_file):
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('is_authorized', False)
+        except:
+            return False
+    return False
 
 # ==================== ДАННЫЕ ====================
 def save_data():
@@ -127,7 +138,7 @@ def get_media_path(uid, bid):
 def get_session_path(uid):
     return os.path.join(SESSIONS_DIR, f'session_{uid}.session')
 
-# ==================== КЛИЕНТ И KEEP-ALIVE ====================
+# ==================== КЛИЕНТ ====================
 async def get_client(uid):
     if uid in sessions:
         try:
@@ -164,7 +175,7 @@ async def keep_alive_loop(uid):
             except:
                 pass
 
-# ==================== ФУНКЦИИ ====================
+# ==================== ADD LIST И АВТОПОДПИСКА ====================
 
 async def resolve_invite_list(link: str, client) -> list:
     groups = []
@@ -172,116 +183,121 @@ async def resolve_invite_list(link: str, client) -> list:
         if 'addlist' in link:
             hash_part = link.split('/')[-1].split('?')[0]
             try:
-                # Проверяем приглашение
-                result = await client(CheckChatInviteRequest(hash_part))
-                if hasattr(result, 'chat'):
-                    if hasattr(result.chat, 'username') and result.chat.username:
-                        groups.append(f'@{result.chat.username}')
-                elif hasattr(result, 'chats'):
-                    for chat in result.chats:
-                        if hasattr(chat, 'username') and chat.username:
-                            groups.append(f'@{chat.username}')
-            except:
-                # Пробуем сразу вступить
                 updates = await client(ImportChatInviteRequest(hash_part))
-                if hasattr(updates, 'chats'):
+                if hasattr(updates, 'chats') and updates.chats:
                     for chat in updates.chats:
                         if hasattr(chat, 'username') and chat.username:
                             groups.append(f'@{chat.username}')
+                        elif hasattr(chat, 'id'):
+                            groups.append(str(chat.id))
+                elif hasattr(updates, 'chat'):
+                    if hasattr(updates.chat, 'username') and updates.chat.username:
+                        groups.append(f'@{updates.chat.username}')
+            except Exception as e:
+                error = str(e).lower()
+                if 'already' in error:
+                    try:
+                        result = await client(CheckChatInviteRequest(hash_part))
+                        if hasattr(result, 'chat'):
+                            if hasattr(result.chat, 'username') and result.chat.username:
+                                groups.append(f'@{result.chat.username}')
+                        elif hasattr(result, 'chats'):
+                            for chat in result.chats:
+                                if hasattr(chat, 'username') and chat.username:
+                                    groups.append(f'@{chat.username}')
+                    except:
+                        pass
         elif 'joinchat' in link or '/+' in link:
             hash_part = link.split('/')[-1].split('?')[0]
             updates = await client(ImportChatInviteRequest(hash_part))
-            if hasattr(updates, 'chats'):
+            if hasattr(updates, 'chats') and updates.chats:
                 for chat in updates.chats:
                     if hasattr(chat, 'username') and chat.username:
                         groups.append(f'@{chat.username}')
+            elif hasattr(updates, 'chat'):
+                if hasattr(updates.chat, 'username') and updates.chat.username:
+                    groups.append(f'@{updates.chat.username}')
         else:
             group = link.replace('https://t.me/', '@').replace('t.me/', '@')
             if not group.startswith('@'):
                 group = '@' + group
             groups = [group]
         return groups
-    except:
+    except Exception as e:
+        print(f"resolve_invite_list error: {e}")
         return []
 
-async def auto_subscribe_to_channels(client, channels, uid=None, bot=None):
-    results = {'success': [], 'failed': []}
-    for channel in channels:
-        try:
-            ch = channel.strip()
-            if 't.me/' in ch:
-                ch = ch.split('t.me/')[-1].split('?')[0]
-            if not ch.startswith('@'):
-                ch = '@' + ch
-            await client(JoinChannelRequest(ch))
-            results['success'].append(ch)
-            if bot and uid:
-                await bot.send_message(uid, f"✅ Подписался на: {ch}")
-            await asyncio.sleep(1)
-        except:
-            results['failed'].append(ch)
-    return results
-
-async def parse_required_subscriptions(text: str) -> list:
-    channels = []
-    patterns = [
-        r'@([a-zA-Z0-9_]{5,32})',
-        r't\.me/([a-zA-Z0-9_]{5,32})',
-        r'https?://t\.me/([a-zA-Z0-9_]{5,32})',
-    ]
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        for match in matches:
-            if match and match not in channels:
-                channels.append(f'@{match}')
-    return channels
+async def send_with_subscribe_check(uid, bid, client, group, text, bot):
+    try:
+        await client.send_message(group, text)
+        return True, "OK"
+    except (ChatWriteForbiddenError, ChannelPrivateError, UserBannedInChannelError) as e:
+        error_text = str(e)
+        channels = []
+        at_matches = re.findall(r'@([a-zA-Z0-9_]{5,32})', error_text)
+        for ch in at_matches:
+            channels.append(f'@{ch}')
+        tm_matches = re.findall(r't\.me/([a-zA-Z0-9_]{5,32})', error_text)
+        for ch in tm_matches:
+            channels.append(f'@{ch}')
+        url_matches = re.findall(r'https?://t\.me/([a-zA-Z0-9_]{5,32})', error_text)
+        for ch in url_matches:
+            channels.append(f'@{ch}')
+        channels = list(dict.fromkeys(channels))
+        if channels:
+            await bot.send_message(uid, f"🔍 Требуется подписка:\n" + "\n".join(channels))
+            subscribed = []
+            for ch in channels:
+                try:
+                    await client(JoinChannelRequest(ch))
+                    subscribed.append(ch)
+                    await bot.send_message(uid, f"✅ Подписался на {ch}")
+                    await asyncio.sleep(1)
+                except Exception as sub_err:
+                    await bot.send_message(uid, f"❌ Не подписался на {ch}")
+            if subscribed:
+                await bot.send_message(uid, f"✅ Подписался на {len(subscribed)} каналов")
+                await asyncio.sleep(2)
+                try:
+                    await client.send_message(group, text)
+                    return True, "OK после подписки"
+                except:
+                    return False, "Не отправилось"
+            else:
+                return False, "Не удалось подписаться"
+        else:
+            return False, f"Нет прав для отправки"
+    except FloodWaitError as e:
+        await asyncio.sleep(e.seconds)
+        return await send_with_subscribe_check(uid, bid, client, group, text, bot)
+    except Exception as e:
+        return False, str(e)[:100]
 
 async def add_groups_from_invite(uid, bot, link, bid):
     client = await get_client(uid)
     if not client:
         await bot.send_message(uid, "❌ Нет активной сессии")
         return False
-    
     await bot.send_message(uid, f"🔄 Обработка ссылки...")
-    
     try:
         groups = await resolve_invite_list(link, client)
         if not groups:
             await bot.send_message(uid, "❌ Не удалось получить группы из ссылки")
             return False
-        
         current = user_data[uid]['broadcasts'][bid].get('groups', [])
         new = list(set(current + groups))
         user_data[uid]['broadcasts'][bid]['groups'] = new
         save_data()
-        
         await bot.send_message(uid, f"✅ Добавлено {len(groups)} групп\nВсего: {len(new)}")
+        if groups:
+            preview = "\n".join(groups[:5])
+            if len(groups) > 5:
+                preview += f"\n... и ещё {len(groups)-5}"
+            await bot.send_message(uid, f"📋 Добавленные группы:\n{preview}")
         return True
     except Exception as e:
         await bot.send_message(uid, f"❌ Ошибка: {str(e)[:100]}")
         return False
-
-async def send_with_subscribe_check(uid, bid, client, group, text, bot):
-    try:
-        await client.send_message(group, text)
-        return True, "OK"
-    except (ChatWriteForbiddenError, ChannelPrivateError) as e:
-        error_msg = str(e).lower()
-        channels = await parse_required_subscriptions(error_msg)
-        if not channels:
-            return False, "Нет прав для отправки"
-        
-        results = await auto_subscribe_to_channels(client, channels, uid, bot)
-        if results['success']:
-            await asyncio.sleep(2)
-            try:
-                await client.send_message(group, text)
-                return True, "OK после подписки"
-            except:
-                return False, "Ошибка после подписки"
-        return False, "Не удалось подписаться"
-    except Exception as e:
-        return False, str(e)[:50]
 
 # ==================== КЛАВИАТУРЫ ====================
 MAIN_MENU = InlineKeyboardMarkup([
