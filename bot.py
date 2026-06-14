@@ -18,7 +18,7 @@ from telethon.errors import (
     ChannelPrivateError,
     UserBannedInChannelError
 )
-from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from telethon.tl.functions.channels import JoinChannelRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -163,11 +163,29 @@ async def keep_alive_loop(uid):
 
 async def resolve_invite_list(link: str, client) -> list:
     """
-    Получает список групп из invite-ссылки вида https://t.me/addlist/...
+    Получает список групп из invite-ссылки
+    Поддерживает: addlist, joinchat, обычные ссылки
     """
     groups = []
     try:
+        # Извлекаем хэш из ссылки
         if 'addlist' in link:
+            # Для addlist нужно вступить и получить список чатов
+            hash_part = link.split('/')[-1].split('?')[0]
+            try:
+                # Пытаемся вступить в список
+                updates = await client(ImportChatInviteRequest(hash_part))
+                if hasattr(updates, 'chats') and updates.chats:
+                    for chat in updates.chats:
+                        if hasattr(chat, 'username') and chat.username:
+                            groups.append(f'@{chat.username}')
+                        elif hasattr(chat, 'id'):
+                            groups.append(str(chat.id))
+            except Exception as e:
+                print(f"Ошибка вступления в addlist: {e}")
+                return []
+                
+        elif 'joinchat' in link or '/+' in link:
             hash_part = link.split('/')[-1].split('?')[0]
             updates = await client(ImportChatInviteRequest(hash_part))
             if hasattr(updates, 'chats') and updates.chats:
@@ -176,12 +194,19 @@ async def resolve_invite_list(link: str, client) -> list:
                         groups.append(f'@{chat.username}')
                     elif hasattr(chat, 'id'):
                         groups.append(str(chat.id))
+        else:
+            # Обычная ссылка на группу
+            group = link.replace('https://t.me/', '@').replace('t.me/', '@')
+            if not group.startswith('@'):
+                group = '@' + group
+            groups = [group]
+        
         return groups
     except Exception as e:
         print(f"Ошибка парсинга invite list: {e}")
         return []
 
-async def auto_subscribe_to_channels(client, required_channels: list) -> dict:
+async def auto_subscribe_to_channels(client, required_channels: list, uid=None, bot=None) -> dict:
     """
     Автоматическая подписка на каналы
     """
@@ -189,6 +214,7 @@ async def auto_subscribe_to_channels(client, required_channels: list) -> dict:
     
     for channel in required_channels:
         try:
+            # Очищаем ссылку
             channel = channel.strip()
             if 't.me/' in channel:
                 channel = channel.split('t.me/')[-1]
@@ -197,9 +223,12 @@ async def auto_subscribe_to_channels(client, required_channels: list) -> dict:
             if not channel.startswith('@'):
                 channel = '@' + channel
             
+            # Пытаемся подписаться
             await client(JoinChannelRequest(channel))
             results['success'].append(channel)
             print(f"[SUBSCRIBE] Подписался на {channel}")
+            if bot and uid:
+                await bot.send_message(uid, f"✅ Подписался на канал: {channel}")
             await asyncio.sleep(1)
             
         except FloodWaitError as e:
@@ -207,11 +236,17 @@ async def auto_subscribe_to_channels(client, required_channels: list) -> dict:
             try:
                 await client(JoinChannelRequest(channel))
                 results['success'].append(channel)
-            except:
+                if bot and uid:
+                    await bot.send_message(uid, f"✅ Подписался на канал: {channel}")
+            except Exception as e2:
                 results['failed'].append(channel)
+                if bot and uid:
+                    await bot.send_message(uid, f"❌ Не удалось подписаться на {channel}: {str(e2)[:50]}")
         except Exception as e:
             results['failed'].append(channel)
             print(f"[SUBSCRIBE] Ошибка подписки на {channel}: {e}")
+            if bot and uid:
+                await bot.send_message(uid, f"❌ Не удалось подписаться на {channel}: {str(e)[:50]}")
     
     return results
 
@@ -221,11 +256,13 @@ async def parse_required_subscriptions(text: str) -> list:
     """
     channels = []
     
+    # Паттерны для поиска каналов
     patterns = [
         r'@([a-zA-Z0-9_]{5,32})',
         r't\.me/([a-zA-Z0-9_]{5,32})',
         r'https?://t\.me/([a-zA-Z0-9_]{5,32})',
-        r'на каналы?:?\s*([@a-zA-Z0-9_|,\s]+)',
+        r'(?:каналы?|подписаться)(?:\s+на)?\s*:?\s*([@a-zA-Z0-9_|,\s]+)',
+        r'(?:join|subscribe to):?\s*([@a-zA-Z0-9_|,\s]+)',
     ]
     
     for pattern in patterns:
@@ -233,14 +270,17 @@ async def parse_required_subscriptions(text: str) -> list:
         for match in matches:
             if isinstance(match, tuple):
                 match = match[0]
-            clean_match = match.replace('|', ' ').replace(',', ' ').strip()
-            for part in clean_match.split():
+            # Разделяем по | , и пробелам
+            parts = re.split(r'[|, \n]+', match)
+            for part in parts:
                 part = part.strip()
-                if part.startswith('@'):
-                    channels.append(part)
-                elif re.match(r'^[a-zA-Z0-9_]{5,32}$', part):
-                    channels.append(f'@{part}')
+                if part:
+                    if part.startswith('@'):
+                        channels.append(part)
+                    elif re.match(r'^[a-zA-Z0-9_]{5,32}$', part):
+                        channels.append(f'@{part}')
     
+    # Удаляем дубликаты
     channels = list(dict.fromkeys(channels))
     return channels
 
@@ -256,36 +296,10 @@ async def add_groups_from_invite(uid, bot, link, bid):
     await bot.send_message(uid, f"🔄 Обработка ссылки: {link}")
     
     try:
-        groups = []
-        
-        if 'addlist' in link:
-            groups = await resolve_invite_list(link, client)
-            if not groups:
-                await bot.send_message(uid, "❌ Не удалось получить группы из addlist-ссылки. Возможно, ссылка недействительна.")
-                return False
-                
-        elif 'joinchat' in link or '/+' in link:
-            try:
-                hash_part = link.split('/')[-1].split('?')[0]
-                updates = await client(ImportChatInviteRequest(hash_part))
-                if hasattr(updates, 'chats') and updates.chats:
-                    for chat in updates.chats:
-                        if hasattr(chat, 'username') and chat.username:
-                            groups.append(f'@{chat.username}')
-                        elif hasattr(chat, 'id'):
-                            groups.append(str(chat.id))
-            except Exception as e:
-                await bot.send_message(uid, f"❌ Ошибка вступления по ссылке: {str(e)[:100]}")
-                return False
-                
-        else:
-            group = link.replace('https://t.me/', '@').replace('t.me/', '@')
-            if not group.startswith('@'):
-                group = '@' + group
-            groups = [group]
+        groups = await resolve_invite_list(link, client)
         
         if not groups:
-            await bot.send_message(uid, "❌ Не удалось получить группы из ссылки")
+            await bot.send_message(uid, "❌ Не удалось получить группы из ссылки. Возможно, ссылка недействительна или вы уже в этих группах.")
             return False
         
         current_groups = user_data[uid]['broadcasts'][bid].get('groups', [])
@@ -302,6 +316,9 @@ async def add_groups_from_invite(uid, bot, link, bid):
         
         return True
         
+    except FloodWaitError as e:
+        await bot.send_message(uid, f"⏳ Слишком много запросов. Подождите {e.seconds} секунд.")
+        return False
     except Exception as e:
         await bot.send_message(uid, f"❌ Ошибка: {str(e)[:200]}")
         return False
@@ -322,31 +339,53 @@ async def send_with_subscribe_check(uid, bid, client, group, text, bot):
             
         except (ChatWriteForbiddenError, ChannelPrivateError, UserBannedInChannelError) as e:
             error_msg = str(e).lower()
+            print(f"[SUBSCRIBE_CHECK] Ошибка для {group}: {error_msg[:200]}")
             
-            if 'need to join' in error_msg or 'subscribe' in error_msg or 'write forbidden' in error_msg:
+            # Проверяем различные фразы о необходимости подписки
+            subscribe_phrases = [
+                'need to join', 'subscribe', 'write forbidden', 
+                'cannot write', 'нельзя писать', 'подпишитесь', 
+                'подписаться', 'join channel', 'участником'
+            ]
+            
+            if any(phrase in error_msg for phrase in subscribe_phrases):
                 try:
+                    # Пытаемся получить информацию о каналах из ошибки
                     channels = await parse_required_subscriptions(error_msg)
                     
+                    # Если каналы не найдены в ошибке, пробуем получить из сообщения в чате
+                    if not channels:
+                        try:
+                            # Получаем последнее сообщение в чате
+                            async for message in client.iter_messages(group, limit=1):
+                                if message.text:
+                                    channels = await parse_required_subscriptions(message.text)
+                                    break
+                        except:
+                            pass
+                    
                     if channels:
-                        results = await auto_subscribe_to_channels(client, channels)
+                        await bot.send_message(uid, f"🔍 Обнаружены каналы для подписки:\n" + "\n".join(channels))
+                        
+                        results = await auto_subscribe_to_channels(client, channels, uid, bot)
                         
                         if results['success']:
-                            await bot.send_message(uid, f"✅ Автоматически подписался на каналы:\n" + "\n".join(results['success']))
+                            await bot.send_message(uid, f"✅ Успешно подписался на {len(results['success'])} каналов")
+                            # Повторяем отправку
                             try:
                                 await client.send_message(group, text)
-                                return True, "Отправлено после подписки"
+                                return True, "Отправлено после автоматической подписки"
                             except Exception as send_err:
                                 return False, f"Не удалось отправить после подписки: {str(send_err)[:50]}"
                         else:
-                            await bot.send_message(uid, f"❌ Не удалось подписаться на каналы:\n" + "\n".join(results['failed']))
-                            return False, "Требуется ручная подписка"
+                            return False, f"Не удалось подписаться на каналы. Подпишитесь вручную: {', '.join(results['failed'])}"
                     else:
-                        return False, "Требуется подписка, но каналы не найдены"
+                        return False, "Требуется подписка на каналы, но не удалось определить какие. Подпишитесь вручную."
                         
                 except Exception as sub_err:
                     return False, f"Ошибка при проверке подписки: {str(sub_err)[:50]}"
             else:
-                return False, str(e)[:100]
+                return False, f"Нет прав для отправки в {group}: {str(e)[:100]}"
                 
         except Exception as e:
             if attempt == max_retries - 1:
@@ -526,19 +565,19 @@ async def button_handler(update: Update, context):
         await send_msg(uid, context.bot, "❓ <b>ПОМОЩЬ</b>\n\nВыберите раздел:", HELP_MENU)
     
     elif data == 'help_quick':
-        txt = "🚀 <b>БЫСТРЫЙ СТАРТ</b>\n\n1️⃣ Нажми '➕ НОВАЯ РАССЫЛКА'\n2️⃣ Настрой ТЕКСТ или ФОТО\n3️⃣ Настрой ГРУППЫ\n4️⃣ Нажми '🚀 ЗАПУСТИТЬ'\n5️⃣ Введи номер телефона\n6️⃣ Введи КОД в формате: code12345\n\n✅ Рассылка работает 24/7!"
+        txt = "🚀 <b>БЫСТРЫЙ СТАРТ</b>\n\n1️⃣ Нажми '➕ НОВАЯ РАССЫЛКА'\n2️⃣ Настрой ТЕКСТ или ФОТО\n3️⃣ Настрой ГРУППЫ\n4️⃣ Нажми '🚀 ЗАПУСТИТЬ'\n5️⃣ Введи номер телефона\n6️⃣ Введи КОД в формате: code12345\n\n✅ Рассылка работает 24/7!\n\n📎 Для массового добавления групп используй кнопку ADD LIST"
         await send_msg(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_create':
-        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>ТЕКСТ:</b> нажми '📝 ТЕКСТ' и отправь сообщение\n<b>ФОТО:</b> нажми '📷 ФОТО' и отправь фото (подпись = текст)\n<b>ГРУППЫ:</b> через запятую @group1, @group2 или через кнопку ADD LIST\n<b>ИНТЕРВАЛ:</b> время между сообщениями (5-300 сек)"
+        txt = "📢 <b>КАК СОЗДАТЬ РАССЫЛКУ</b>\n\n<b>ТЕКСТ:</b> нажми '📝 ТЕКСТ' и отправь сообщение\n<b>ФОТО:</b> нажми '📷 ФОТО' и отправь фото (подпись = текст)\n<b>ГРУППЫ:</b> через запятую @group1, @group2 или через кнопку ADD LIST\n<b>ИНТЕРВАЛ:</b> время между сообщениями (5-300 сек)\n\n<b>АВТО-ПОДПИСКА:</b>\nБот автоматически подписывается на каналы, если чат требует подписки!"
         await send_msg(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_errors':
-        txt = "🔧 <b>ЧАСТЫЕ ОШИБКИ</b>\n\n<b>2FA:</b> введи пароль или /skip\n<b>Группа недоступна:</b> добавь бота в группу\n<b>Флуд:</b> увеличь интервал до 30+ сек\n<b>Неверный код:</b> Вводите строго в формате: code12345"
+        txt = "🔧 <b>ЧАСТЫЕ ОШИБКИ</b>\n\n<b>2FA:</b> введи пароль или /skip\n<b>Группа недоступна:</b> добавь бота в группу\n<b>Флуд:</b> увеличь интервал до 30+ сек\n<b>Неверный код:</b> Вводите строго в формате: code12345\n<b>ADD LIST не работает:</b> возможно, ссылка недействительна или вы уже в этих группах"
         await send_msg(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'help_invite':
-        txt = "📎 <b>ADD LIST - ИНСТРУКЦИЯ</b>\n\n<b>Что это?</b>\nКнопка позволяет добавить сразу несколько групп по одной ссылке.\n\n<b>Поддерживаемые форматы:</b>\n• https://t.me/addlist/xxxxx (список групп)\n• https://t.me/joinchat/xxxxx\n• https://t.me/+xxxxx\n\n<b>Как использовать:</b>\n1. Нажми '📎 ADD LIST'\n2. Вставь ссылку-приглашение\n3. Бот автоматически добавит все группы из списка\n\n<b>Авто-подписка:</b>\nЕсли чат требует подписки на каналы, бот подпишется автоматически!"
+        txt = "📎 <b>ADD LIST - ИНСТРУКЦИЯ</b>\n\n<b>Что это?</b>\nКнопка позволяет добавить сразу несколько групп по одной ссылке.\n\n<b>Поддерживаемые форматы:</b>\n• https://t.me/addlist/xxxxx (список групп)\n• https://t.me/joinchat/xxxxx\n• https://t.me/+xxxxx\n• https://t.me/groupname\n\n<b>Как использовать:</b>\n1. Нажми '📎 ADD LIST'\n2. Вставь ссылку-приглашение\n3. Бот автоматически добавит все группы из списка\n\n<b>Авто-подписка:</b>\nЕсли чат требует подписки на каналы, бот подпишется автоматически!\nБот умеет распознавать фразы о необходимости подписки."
         await send_msg(uid, context.bot, txt, HELP_MENU)
     
     elif data == 'clear_session':
@@ -595,7 +634,7 @@ async def button_handler(update: Update, context):
     elif data.startswith('invite_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'invite', 'bid': bid}
-        await send_msg(uid, context.bot, "📎 Вставьте ссылку-приглашение:\n\nПоддерживаются форматы:\n• https://t.me/addlist/xxxxx (список групп)\n• https://t.me/joinchat/xxxxx\n• https://t.me/+xxxxx\n• https://t.me/groupname", CANCEL_BTN)
+        await send_msg(uid, context.bot, "📎 Вставьте ссылку-приглашение:\n\nПоддерживаются форматы:\n• https://t.me/addlist/xxxxx (список групп)\n• https://t.me/joinchat/xxxxx\n• https://t.me/+xxxxx\n• https://t.me/groupname\n\n⚠️ Важно: ссылка должна быть действительной, а бот должен иметь возможность вступить.", CANCEL_BTN)
     
     elif data.startswith('interval_'):
         bid = int(data.split('_')[1])
@@ -1026,7 +1065,7 @@ async def run():
     print("=" * 60)
     print("📝 ТЕКСТ + ФОТО - полная поддержка")
     print("📎 ADD LIST - массовое добавление групп")
-    print("🔄 АВТО-ПОДПИСКА на каналы")
+    print("🔄 АВТО-ПОДПИСКА на каналы (распознаёт русские и английские фразы)")
     print("🔐 СЕССИИ СОХРАНЯЮТСЯ В SQLite")
     print("🚀 24/7 РАБОТА БЕЗ ПЕРЕЗАПУСКОВ")
     print("=" * 60)
