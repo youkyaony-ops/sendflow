@@ -7,7 +7,17 @@ import random
 import shutil
 from datetime import datetime
 from telethon import TelegramClient, errors
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError, AuthKeyError, RPCError, ChatWriteForbiddenError, ChannelPrivateError, UserBannedInChannelError
+from telethon.errors import (
+    SessionPasswordNeededError, 
+    PhoneCodeInvalidError, 
+    FloodWaitError, 
+    AuthKeyError, 
+    RPCError,
+    ChatWriteForbiddenError,
+    ChannelPrivateError,
+    UserBannedInChannelError,
+    UserAlreadyParticipantError
+)
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -39,8 +49,9 @@ def save_session_db(user_id, phone):
         data = {'phone': phone, 'is_authorized': True, 'created_at': str(datetime.now()), 'last_used': str(datetime.now())}
         with open(os.path.join(SESSIONS_DIR, f'session_{user_id}.json'), 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
     except:
-        pass
+        return False
 
 def update_ping_db(user_id):
     try:
@@ -90,8 +101,9 @@ def save_data():
                     'total_sent': data.get('total_sent', 0)
                 }
             json.dump(clean_data, f, ensure_ascii=False, indent=2)
+        return True
     except:
-        pass
+        return False
 
 def load_data():
     global user_data
@@ -102,8 +114,10 @@ def load_data():
                 user_data = {int(k): v for k, v in loaded.items()}
         else:
             user_data = {}
+        return True
     except:
         user_data = {}
+        return False
 
 def save_user(uid):
     if uid not in user_data:
@@ -122,19 +136,21 @@ def get_media_path(uid, bid):
 def get_session_path(uid):
     return os.path.join(SESSIONS_DIR, f'session_{uid}.session')
 
-# ==================== КЛИЕНТ ====================
+# ==================== КЛИЕНТ С АВТО-ВОССТАНОВЛЕНИЕМ ====================
 async def get_client(uid):
     if uid in sessions:
         try:
             await sessions[uid].get_me()
             update_ping_db(uid)
             return sessions[uid]
-        except:
+        except (AuthKeyError, ConnectionError, RPCError):
             try:
                 await sessions[uid].disconnect()
             except:
                 pass
             del sessions[uid]
+        except:
+            pass
     
     session_file = get_session_path(uid)
     client = TelegramClient(session_file, API_ID, API_HASH)
@@ -145,8 +161,8 @@ async def get_client(uid):
             sessions[uid] = client
             update_ping_db(uid)
             return client
-    except:
-        pass
+    except Exception as e:
+        print(f"[CLIENT] Ошибка для {uid}: {e}")
     return None
 
 async def keep_alive_loop(uid):
@@ -156,148 +172,150 @@ async def keep_alive_loop(uid):
             try:
                 await sessions[uid].get_me()
                 update_ping_db(uid)
-            except:
-                pass
+                print(f"[KEEP_ALIVE] Пинг для {uid} успешен")
+            except Exception as e:
+                print(f"[KEEP_ALIVE] Ошибка для {uid}: {e}")
+                await get_client(uid)
 
-# ==================== АВТОПОДПИСКА (НА ВСЁ) ====================
-async def auto_join_all(client, group_entity, bot, uid) -> bool:
-    """
-    Ищет ссылки на чаты/группы/каналы в последних сообщениях и вступает
-    """
+# ==================== АВТО-ВСТУПЛЕНИЕ (РАБОЧАЯ ВЕРСИЯ) ====================
+async def extract_links_from_text(text: str) -> list:
+    """Извлекает все возможные ссылки из текста"""
+    links = []
+    
+    patterns = [
+        # @username
+        (r'@([a-zA-Z0-9_]{5,32})', lambda m: f'@{m}'),
+        # t.me/username
+        (r't\.me/([a-zA-Z0-9_]{5,32})', lambda m: f'@{m}'),
+        # https://t.me/username
+        (r'https?://t\.me/([a-zA-Z0-9_]{5,32})', lambda m: f'@{m}'),
+        # t.me/joinchat/xxxxx
+        (r't\.me/joinchat/([a-zA-Z0-9_-]+)', lambda m: f'https://t.me/joinchat/{m}'),
+        # https://t.me/joinchat/xxxxx
+        (r'https?://t\.me/joinchat/([a-zA-Z0-9_-]+)', lambda m: f'https://t.me/joinchat/{m}'),
+        # t.me/+xxxxx
+        (r't\.me/(\+[a-zA-Z0-9_-]+)', lambda m: f'https://t.me/{m}'),
+        # https://t.me/+xxxxx
+        (r'https?://t\.me/(\+[a-zA-Z0-9_-]+)', lambda m: f'https://t.me/{m}'),
+        # t.me/addlist/xxxxx
+        (r't\.me/addlist/([a-zA-Z0-9_-]+)', lambda m: f'https://t.me/addlist/{m}'),
+        # https://t.me/addlist/xxxxx
+        (r'https?://t\.me/addlist/([a-zA-Z0-9_-]+)', lambda m: f'https://t.me/addlist/{m}'),
+    ]
+    
+    for pattern, formatter in patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        for match in matches:
+            link = formatter(match) if callable(formatter) else formatter
+            if link not in links:
+                links.append(link)
+    
+    return links
+
+async def join_link(client, link: str) -> tuple:
+    """Вступает по ссылке, возвращает (успех, сообщение)"""
     try:
-        # Получаем последние 30 сообщений в чате
+        if 'joinchat' in link or '+' in link or 'addlist' in link:
+            hash_part = link.split('/')[-1].split('?')[0]
+            await client(ImportChatInviteRequest(hash_part))
+            return True, "Вступил по пригласительной ссылке"
+        else:
+            clean_link = link.replace('https://t.me/', '@').replace('t.me/', '@')
+            if not clean_link.startswith('@'):
+                clean_link = '@' + clean_link
+            await client(JoinChannelRequest(clean_link))
+            return True, f"Вступил в {clean_link}"
+    except UserAlreadyParticipantError:
+        return True, f"Уже участник"
+    except FloodWaitError as e:
+        await asyncio.sleep(e.seconds)
+        return await join_link(client, link)
+    except Exception as e:
+        return False, str(e)[:50]
+
+async def auto_join_all(client, group_entity, bot, uid) -> bool:
+    """Ищет ссылки в последних сообщениях и вступает"""
+    try:
+        # Получаем последние 30 сообщений
         messages = []
         async for msg in client.iter_messages(group_entity, limit=30):
-            if msg.text and len(msg.text) > 10:
+            if msg.text and len(msg.text) > 5:
                 messages.append(msg.text)
         
-        # Ищем ссылки в сообщениях
-        links = []
-        
-        # Паттерны для поиска (все возможные форматы)
-        patterns = [
-            # @username
-            r'@([a-zA-Z0-9_]{5,32})',
-            # t.me/username
-            r't\.me/([a-zA-Z0-9_]{5,32})',
-            # https://t.me/username
-            r'https?://t\.me/([a-zA-Z0-9_]{5,32})',
-            # Пригласительные ссылки
-            r't\.me/joinchat/([a-zA-Z0-9_-]+)',
-            r'https?://t\.me/joinchat/([a-zA-Z0-9_-]+)',
-            r't\.me/\+([a-zA-Z0-9_-]+)',
-            r'https?://t\.me/\+([a-zA-Z0-9_-]+)',
-            # addlist ссылки
-            r't\.me/addlist/([a-zA-Z0-9_-]+)',
-            r'https?://t\.me/addlist/([a-zA-Z0-9_-]+)',
-            # Русские фразы
-            r'вступить\s+в\s+@([a-zA-Z0-9_]+)',
-            r'перейти\s+в\s+@([a-zA-Z0-9_]+)',
-            r'зайти\s+в\s+@([a-zA-Z0-9_]+)',
-            r'join\s+@([a-zA-Z0-9_]+)',
-            r'чат\s+@([a-zA-Z0-9_]+)',
-            r'группа\s+@([a-zA-Z0-9_]+)',
-            r'канал\s+@([a-zA-Z0-9_]+)',
-        ]
-        
-        for msg in messages:
-            msg_lower = msg.lower()
-            for pattern in patterns:
-                matches = re.findall(pattern, msg, re.IGNORECASE)
-                for match in matches:
-                    # Формируем ссылку
-                    if match.startswith('joinchat') or '+' in match or 'addlist' in str(match):
-                        link = f'https://t.me/joinchat/{match}'
-                    else:
-                        link = f'@{match}' if not match.startswith('@') else match
-                    
-                    if link not in links and len(link) > 3:
-                        links.append(link)
-        
-        links = list(dict.fromkeys(links))
-        
-        if not links:
+        if not messages:
             return False
         
-        await bot.send_message(uid, f"🔍 Найдены ссылки для вступления:\n" + "\n".join(links[:10]))
+        # Собираем все ссылки из сообщений
+        all_links = []
+        for msg in messages:
+            links = await extract_links_from_text(msg)
+            all_links.extend(links)
         
-        # Вступаем в каждую найденную ссылку
-        joined = []
-        for link in links[:10]:
-            try:
-                if 'joinchat' in link or '+' in link or 'addlist' in link:
-                    # Пригласительная ссылка
-                    hash_part = link.split('/')[-1].split('?')[0]
-                    await client(ImportChatInviteRequest(hash_part))
-                    joined.append(link)
-                    await bot.send_message(uid, f"✅ Вступил по ссылке: {link[:50]}...")
-                else:
-                    # Обычная ссылка @username
-                    await client(JoinChannelRequest(link))
-                    joined.append(link)
-                    await bot.send_message(uid, f"✅ Вступил в: {link}")
-                await asyncio.sleep(2)
-            except FloodWaitError as e:
-                await asyncio.sleep(e.seconds)
-                try:
-                    if 'joinchat' in link or '+' in link:
-                        hash_part = link.split('/')[-1].split('?')[0]
-                        await client(ImportChatInviteRequest(hash_part))
-                    else:
-                        await client(JoinChannelRequest(link))
-                    joined.append(link)
-                except:
-                    pass
-            except Exception as e:
-                await bot.send_message(uid, f"❌ Не вступил: {link[:50]}... - {str(e)[:50]}")
+        all_links = list(dict.fromkeys(all_links))
         
-        return len(joined) > 0
+        if not all_links:
+            await bot.send_message(uid, "ℹ️ Не найдено ссылок для вступления в сообщениях чата.")
+            return False
+        
+        await bot.send_message(uid, f"🔍 Найдено {len(all_links)} ссылок для вступления:\n" + "\n".join(all_links[:5]) + ("\n..." if len(all_links) > 5 else ""))
+        
+        # Вступаем по каждой ссылке
+        joined = 0
+        for link in all_links[:10]:
+            success, msg_result = await join_link(client, link)
+            if success:
+                joined += 1
+                await bot.send_message(uid, f"✅ {msg_result}")
+            else:
+                await bot.send_message(uid, f"❌ Не вступил: {msg_result}")
+            await asyncio.sleep(1.5)
+        
+        return joined > 0
         
     except Exception as e:
-        print(f"Auto join error: {e}")
+        print(f"[AUTO_JOIN] Ошибка: {e}")
         return False
 
 async def send_with_auto_join(uid, bid, client, group, text, bot):
-    """
-    Отправляет сообщение, при ошибке ищет ссылки и вступает
-    """
+    """Отправляет сообщение, при ошибке пытается вступить"""
+    # Сначала пробуем отправить
     try:
         await client.send_message(group, text)
         return True, "OK"
-        
     except FloodWaitError as e:
         await asyncio.sleep(e.seconds)
         return await send_with_auto_join(uid, bid, client, group, text, bot)
-        
     except (ChatWriteForbiddenError, ChannelPrivateError, UserBannedInChannelError) as e:
         error_msg = str(e).lower()
         
         # Ключевые слова, указывающие на необходимость вступления
         join_keywords = [
-            'join', 'subscribe', 'подпишись', 'подписаться', 
-            'канал', 'channel', 'вступить', 'вступай', 
-            'чат', 'группа', 'group', 'участником'
+            'join', 'subscribe', 'подпишись', 'подписаться', 'канал', 'channel',
+            'вступить', 'вступай', 'чат', 'группа', 'group', 'участником',
+            'нельзя писать', 'write forbidden', 'banned', 'restricted'
         ]
         
         if any(word in error_msg for word in join_keywords):
             await bot.send_message(uid, f"🔍 Требуется вступление для отправки в {group}")
             
-            group_entity = await client.get_entity(group)
-            joined = await auto_join_all(client, group_entity, bot, uid)
-            
-            if joined:
-                await bot.send_message(uid, f"✅ Вступил в найденные чаты/группы, пробую отправить снова...")
-                await asyncio.sleep(3)
-                try:
-                    await client.send_message(group, text)
-                    return True, "OK после вступления"
-                except Exception as send_err:
-                    return False, f"Не отправилось после вступления: {str(send_err)[:50]}"
-            else:
-                return False, "Не удалось найти ссылки для вступления"
+            try:
+                group_entity = await client.get_entity(group)
+                joined = await auto_join_all(client, group_entity, bot, uid)
+                
+                if joined:
+                    await bot.send_message(uid, f"✅ Вступил в найденные чаты/группы, пробую отправить снова...")
+                    await asyncio.sleep(3)
+                    try:
+                        await client.send_message(group, text)
+                        return True, "OK после вступления"
+                    except Exception as send_err:
+                        return False, f"Не отправилось после вступления: {str(send_err)[:50]}"
+                else:
+                    return False, "Не удалось найти ссылки для вступления"
+            except Exception as e2:
+                return False, f"Ошибка при проверке: {str(e2)[:50]}"
         else:
             return False, f"Нет прав для отправки: {str(e)[:100]}"
-            
     except Exception as e:
         return False, str(e)[:100]
 
@@ -439,7 +457,7 @@ async def button_handler(update: Update, context):
         await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал", HELP_MENU)
     
     elif data == 'help_auto':
-        await send_msg(uid, context.bot, "🤖 АВТО-ВСТУПЛЕНИЕ\n\nЕсли чат/группа/канал требует подписки или вступления, бот:\n1. Прочитает последние сообщения\n2. Найдёт все ссылки (t.me/..., @username)\n3. Автоматически вступит\n4. Повторит отправку\n\n✅ Работает со всеми типами ссылок!", HELP_MENU)
+        await send_msg(uid, context.bot, "🤖 АВТО-ВСТУПЛЕНИЕ\n\nЕсли чат требует подписки или вступления:\n1. Бот читает последние 30 сообщений\n2. Находит все ссылки\n3. Автоматически вступает\n4. Повторяет отправку\n\n✅ Работает со всеми типами ссылок!", HELP_MENU)
     
     elif data == 'clear_session':
         for tk in list(active_tasks.keys()):
@@ -448,6 +466,7 @@ async def button_handler(update: Update, context):
                     active_tasks[tk].cancel()
                 except:
                     pass
+                await asyncio.sleep(0.3)
                 if tk in active_tasks:
                     del active_tasks[tk]
         if uid in sessions:
@@ -514,6 +533,7 @@ async def button_handler(update: Update, context):
         tk = f"{uid}_{bid}"
         if tk in active_tasks:
             active_tasks[tk].cancel()
+            await asyncio.sleep(0.3)
             if tk in active_tasks:
                 del active_tasks[tk]
             await send_msg(uid, context.bot, f"🛑 Рассылка #{bid+1} остановлена")
@@ -548,6 +568,9 @@ async def button_handler(update: Update, context):
         tk = f"{uid}_{bid}"
         if tk in active_tasks:
             active_tasks[tk].cancel()
+            await asyncio.sleep(0.3)
+            if tk in active_tasks:
+                del active_tasks[tk]
         media = get_media_path(uid, bid)
         if os.path.exists(media):
             os.remove(media)
@@ -632,14 +655,14 @@ async def run_broadcast(uid, bid, client, groups, text, interval, media_path, ha
                     user_data[uid]['broadcasts'][bid]['sent'] = sent
                     save_data()
                 except FloodWaitError as e:
-                    await asyncio.sleep(e.seconds)
-                except:
-                    pass
+                    await asyncio.sleep(min(e.seconds, 60))
+                except Exception as e:
+                    print(f"[BROADCAST] Ошибка: {e}")
                 await asyncio.sleep(interval)
     except asyncio.CancelledError:
-        pass
+        print(f"[BROADCAST] Рассылка #{bid+1} для {uid} остановлена")
 
-# ==================== ОБРАБОТЧИК ====================
+# ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
 async def message_handler(update: Update, context):
     uid = update.effective_user.id
     save_user(uid)
@@ -667,8 +690,13 @@ async def message_handler(update: Update, context):
         del user_states[uid]
     
     elif step == 'text':
+        if not update.message.text:
+            return
         bid = step_data['bid']
         text = update.message.text.strip()
+        if len(text) > 4096:
+            await send_msg(uid, context.bot, "❌ Текст слишком длинный (макс 4096 символов)", CANCEL_BTN)
+            return
         user_data[uid]['broadcasts'][bid]['text'] = text
         save_data()
         await send_msg(uid, context.bot, "✅ Текст сохранён")
@@ -758,13 +786,16 @@ async def message_handler(update: Update, context):
         if not update.message.text:
             return
         text = update.message.text.strip().lower()
-        if not text.startswith('code') or not text[4:].isdigit():
-            await send_msg(uid, context.bot, "❌ Формат: code12345", CANCEL_BTN)
+        if not text.startswith('code'):
+            await send_msg(uid, context.bot, "❌ НЕВЕРНЫЙ ФОРМАТ!\n\nВведите код строго в формате:\ncode12345\n(где 12345 - цифры из Telegram)", CANCEL_BTN)
             return
         code = text[4:]
+        if not code.isdigit():
+            await send_msg(uid, context.bot, "❌ После 'code' должны быть только цифры!\nПример: code12345", CANCEL_BTN)
+            return
         user_states[uid]['code'] = code
         user_states[uid]['step'] = '2fa'
-        await send_msg(uid, context.bot, "🔐 Пароль 2FA или /skip", CANCEL_BTN)
+        await send_msg(uid, context.bot, "🔐 Пароль 2FA (если есть) или /skip", CANCEL_BTN)
     
     elif step == '2fa':
         if not update.message.text:
@@ -772,7 +803,7 @@ async def message_handler(update: Update, context):
         password = None if update.message.text.strip() == '/skip' else update.message.text.strip()
         client = sessions.get(uid)
         if not client:
-            await send_msg(uid, context.bot, "❌ Ошибка", MAIN_MENU)
+            await send_msg(uid, context.bot, "❌ Ошибка сессии", MAIN_MENU)
             del user_states[uid]
             return
         
@@ -784,13 +815,17 @@ async def message_handler(update: Update, context):
             await client.sign_in(phone, code=code)
         except SessionPasswordNeededError:
             if not password:
-                await send_msg(uid, context.bot, "🔐 Введите пароль:", CANCEL_BTN)
+                await send_msg(uid, context.bot, "🔐 Введите пароль 2FA:", CANCEL_BTN)
                 return
             try:
                 await client.sign_in(password=password)
             except:
                 await send_msg(uid, context.bot, "❌ Неверный пароль", CANCEL_BTN)
                 return
+        except PhoneCodeInvalidError:
+            await send_msg(uid, context.bot, "❌ НЕВЕРНЫЙ КОД!\nНачните авторизацию заново.", MAIN_MENU)
+            del user_states[uid]
+            return
         except Exception as e:
             await send_msg(uid, context.bot, f"❌ {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
@@ -842,9 +877,9 @@ async def run():
     await bot_app.bot.set_webhook(f"{RENDER_URL}/webhook/{BOT_TOKEN}")
     
     print("=" * 60)
-    print("✅ БОТ ЗАПУЩЕН")
-    print("🤖 АВТО-ВСТУПЛЕНИЕ ВКЛЮЧЕНО")
-    print("📌 РАБОТАЕТ С ЧАТАМИ, ГРУППАМИ, КАНАЛАМИ")
+    print("✅ SENDFLOW БОТ ЗАПУЩЕН")
+    print("🤖 АВТО-ВСТУПЛЕНИЕ АКТИВНО")
+    print("📌 ПОДДЕРЖИВАЕТ: @username, t.me/..., joinchat, +, addlist")
     print("=" * 60)
     
     await start_server()
