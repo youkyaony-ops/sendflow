@@ -176,62 +176,95 @@ async def keep_alive_loop(uid):
             except:
                 pass
 
-# ==================== АВТОПОДПИСКА (НАЖИМАЕТ НА КНОПКИ) ====================
+# ==================== АВТОПОДПИСКА (ПОЛНОСТЬЮ ПЕРЕПИСАНА) ====================
 
 async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
     """
-    Автоподписка - нажимает на inline кнопки типа "Подписаться 1"
+    Автоподписка - нажимает кнопки и переходит по ссылкам
     """
     try:
         await bot.send_message(uid, "🔍 Обнаружен антиспам-бот, обрабатываю...")
         
-        # Ждём ответ от бота-антиспама
         await asyncio.sleep(3)
         
-        # Получаем последние 15 сообщений
         messages = []
         async for msg in client.iter_messages(group_entity, limit=15):
             messages.append(msg)
         
-        # Ищем сообщение с кнопками
         me = await client.get_me()
+        subscribed = 0
+        
         for msg in messages:
-            # Если сообщение от другого бота и есть кнопки
-            if msg.sender_id != me.id and msg.reply_markup:
-                await bot.send_message(uid, f"🔘 Найдены кнопки в сообщении")
+            if msg.sender_id != me.id:
                 
-                # Перебираем все кнопки
-                pressed = 0
-                for row in msg.reply_markup.rows:
-                    for button in row.buttons:
-                        try:
-                            # Нажимаем на кнопку
-                            await client.click(msg, button.text)
-                            pressed += 1
-                            await bot.send_message(uid, f"✅ Нажал кнопку: {button.text}")
-                            await asyncio.sleep(1)
-                        except Exception as e:
-                            await bot.send_message(uid, f"❌ Ошибка при нажатии {button.text}: {str(e)[:50]}")
+                # ===== 1. Обрабатываем кнопки =====
+                if msg.reply_markup:
+                    await bot.send_message(uid, "🔘 Найдены кнопки, обрабатываю...")
+                    
+                    for row in msg.reply_markup.rows:
+                        for button in row.buttons:
+                            # Кнопка-ссылка (url)
+                            if hasattr(button, 'url') and button.url:
+                                link = button.url
+                                await bot.send_message(uid, f"🔗 Перехожу по ссылке: {link}")
+                                
+                                # Извлекаем username из ссылки
+                                if 't.me/' in link:
+                                    username = link.split('t.me/')[-1].split('?')[0]
+                                    if username:
+                                        try:
+                                            await client(JoinChannelRequest(f'@{username}'))
+                                            subscribed += 1
+                                            await bot.send_message(uid, f"✅ Подписался на @{username}")
+                                            await asyncio.sleep(1)
+                                        except UserAlreadyParticipantError:
+                                            await bot.send_message(uid, f"ℹ️ Уже подписан на @{username}")
+                                        except Exception as e:
+                                            await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
+                            
+                            # Кнопка с callback_data - нажимаем
+                            elif hasattr(button, 'data') and button.data:
+                                try:
+                                    await client.click(msg, button.text)
+                                    await bot.send_message(uid, f"✅ Нажал кнопку: {button.text}")
+                                    await asyncio.sleep(1)
+                                except Exception as e:
+                                    await bot.send_message(uid, f"❌ Ошибка при нажатии: {str(e)[:50]}")
                 
-                if pressed > 0:
-                    await bot.send_message(uid, f"✅ Нажато кнопок: {pressed}")
-                    return True
-                
-                # Также ищем ссылки в тексте
+                # ===== 2. Ищем ссылки в тексте =====
                 if msg.text:
+                    # Ищем t.me/username
+                    tm_matches = re.findall(r't\.me/([a-zA-Z0-9_]{5,32})', msg.text)
+                    for match in tm_matches:
+                        try:
+                            await client(JoinChannelRequest(f'@{match}'))
+                            subscribed += 1
+                            await bot.send_message(uid, f"✅ Подписался на @{match}")
+                            await asyncio.sleep(1)
+                        except UserAlreadyParticipantError:
+                            await bot.send_message(uid, f"ℹ️ Уже подписан на @{match}")
+                        except:
+                            pass
+                    
                     # Ищем @username
                     at_matches = re.findall(r'@([a-zA-Z0-9_]{5,32})', msg.text)
                     for match in at_matches:
-                        channel = f'@{match}'
                         try:
-                            await client(JoinChannelRequest(channel))
-                            await bot.send_message(uid, f"✅ Подписался на {channel}")
+                            await client(JoinChannelRequest(f'@{match}'))
+                            subscribed += 1
+                            await bot.send_message(uid, f"✅ Подписался на @{match}")
                             await asyncio.sleep(1)
+                        except UserAlreadyParticipantError:
+                            await bot.send_message(uid, f"ℹ️ Уже подписан на @{match}")
                         except:
                             pass
         
-        await bot.send_message(uid, "⚠️ Не найдено кнопок для нажатия")
-        return False
+        if subscribed > 0:
+            await bot.send_message(uid, f"✅ Успешно подписался на {subscribed} каналов/групп")
+            return True
+        else:
+            await bot.send_message(uid, "⚠️ Не найдено ссылок для подписки")
+            return False
         
     except Exception as e:
         await bot.send_message(uid, f"❌ Ошибка: {str(e)[:150]}")
@@ -241,7 +274,6 @@ async def send_with_auto_join(uid, bid, client, group, text, bot):
     """
     Отправляет сообщение, при ошибке запускает автоподписку
     """
-    # Пробуем отправить
     try:
         await client.send_message(group, text)
         return True, "OK"
@@ -254,7 +286,6 @@ async def send_with_auto_join(uid, bid, client, group, text, bot):
         error_msg = str(e)
         await bot.send_message(uid, f"⚠️ Требуется подписка для {group}")
         
-        # Запускаем автоподписку
         try:
             group_entity = await client.get_entity(group)
             success = await auto_subscribe_to_all(client, group_entity, bot, uid)
@@ -414,7 +445,7 @@ async def button_handler(update: Update, context):
         await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал", HELP_MENU)
     
     elif data == 'help_auto':
-        await send_msg(uid, context.bot, "🤖 АВТОПОДПИСКА\n\nЕсли бот-антиспам удаляет сообщение и просит подписаться:\n\n1. Бот находит сообщение с кнопками\n2. Нажимает на все кнопки\n3. Подписывается на @username\n4. Повторяет отправку\n\n✅ Работает с кнопками 'Подписаться 1' и т.д.!", HELP_MENU)
+        await send_msg(uid, context.bot, "🤖 АВТОПОДПИСКА\n\nЕсли бот-антиспам удаляет сообщение и просит подписаться:\n\n1. Бот находит кнопки-ссылки\n2. Переходит по ссылкам\n3. Подписывается на каналы/группы\n4. Повторяет отправку\n\n✅ Работает с кнопками 'Подписаться' и ссылками t.me/username", HELP_MENU)
     
     elif data == 'clear_session':
         for tk in list(active_tasks.keys()):
@@ -589,7 +620,7 @@ async def start_broadcast(uid, bot, bid, client):
     
     bc['groups'] = valid
     save_data()
-    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Автоподписка включена! Бот будет нажимать кнопки")
+    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Автоподписка включена!")
     
     tk = f"{uid}_{bid}"
     task = asyncio.create_task(run_broadcast(uid, bid, client, valid, text, interval, media_path, has_photo, bot))
@@ -835,8 +866,8 @@ async def run():
     
     print("=" * 60)
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
-    print("🤖 АВТОПОДПИСКА АКТИВНА - НАЖИМАЕТ КНОПКИ")
-    print("📌 РАБОТАЕТ С КНОПКАМИ 'ПОДПИСАТЬСЯ 1' И Т.Д.")
+    print("🤖 АВТОПОДПИСКА АКТИВНА")
+    print("📌 ПЕРЕХОДИТ ПО ССЫЛКАМ И ПОДПИСЫВАЕТСЯ")
     print("=" * 60)
     
     await start_server()
@@ -846,4 +877,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
