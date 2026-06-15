@@ -16,7 +16,8 @@ from telethon.errors import (
     ChatWriteForbiddenError,
     ChannelPrivateError,
     UserBannedInChannelError,
-    UserAlreadyParticipantError
+    UserAlreadyParticipantError,
+    InviteRequestSentError
 )
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
@@ -177,65 +178,92 @@ async def keep_alive_loop(uid):
                 print(f"[KEEP_ALIVE] Ошибка для {uid}: {e}")
                 await get_client(uid)
 
-# ==================== АВТО-ВСТУПЛЕНИЕ (РАБОЧАЯ ВЕРСИЯ) ====================
-async def extract_links_from_text(text: str) -> list:
-    """Извлекает все возможные ссылки из текста"""
+# ==================== АВТО-ВСТУПЛЕНИЕ (ПОЛНАЯ ВЕРСИЯ) ====================
+
+async def extract_all_links_from_text(text: str) -> list:
+    """Извлекает все возможные ссылки из текста (русские и английские фразы)"""
     links = []
     
     patterns = [
-        # @username
-        (r'@([a-zA-Z0-9_]{5,32})', lambda m: f'@{m}'),
-        # t.me/username
-        (r't\.me/([a-zA-Z0-9_]{5,32})', lambda m: f'@{m}'),
-        # https://t.me/username
-        (r'https?://t\.me/([a-zA-Z0-9_]{5,32})', lambda m: f'@{m}'),
-        # t.me/joinchat/xxxxx
-        (r't\.me/joinchat/([a-zA-Z0-9_-]+)', lambda m: f'https://t.me/joinchat/{m}'),
-        # https://t.me/joinchat/xxxxx
-        (r'https?://t\.me/joinchat/([a-zA-Z0-9_-]+)', lambda m: f'https://t.me/joinchat/{m}'),
-        # t.me/+xxxxx
-        (r't\.me/(\+[a-zA-Z0-9_-]+)', lambda m: f'https://t.me/{m}'),
-        # https://t.me/+xxxxx
-        (r'https?://t\.me/(\+[a-zA-Z0-9_-]+)', lambda m: f'https://t.me/{m}'),
-        # t.me/addlist/xxxxx
-        (r't\.me/addlist/([a-zA-Z0-9_-]+)', lambda m: f'https://t.me/addlist/{m}'),
-        # https://t.me/addlist/xxxxx
-        (r'https?://t\.me/addlist/([a-zA-Z0-9_-]+)', lambda m: f'https://t.me/addlist/{m}'),
+        # Стандартные ссылки
+        (r'@([a-zA-Z0-9_]{5,32})', 'username'),
+        (r't\.me/([a-zA-Z0-9_]{5,32})', 'username'),
+        (r'https?://t\.me/([a-zA-Z0-9_]{5,32})', 'username'),
+        (r't\.me/joinchat/([a-zA-Z0-9_-]+)', 'invite'),
+        (r'https?://t\.me/joinchat/([a-zA-Z0-9_-]+)', 'invite'),
+        (r't\.me/(\+[a-zA-Z0-9_-]+)', 'invite'),
+        (r'https?://t\.me/(\+[a-zA-Z0-9_-]+)', 'invite'),
+        (r't\.me/addlist/([a-zA-Z0-9_-]+)', 'invite'),
+        (r'https?://t\.me/addlist/([a-zA-Z0-9_-]+)', 'invite'),
+        # Русские фразы
+        (r'канал[а-я]*\s+@([a-zA-Z0-9_]+)', 'username'),
+        (r'чат[а-я]*\s+@([a-zA-Z0-9_]+)', 'username'),
+        (r'групп[а-я]*\s+@([a-zA-Z0-9_]+)', 'username'),
+        (r'подпишись\s+на\s+@([a-zA-Z0-9_]+)', 'username'),
+        (r'вступи\s+в\s+@([a-zA-Z0-9_]+)', 'username'),
+        (r'подпишитесь\s+на\s+@([a-zA-Z0-9_]+)', 'username'),
+        (r'перейдите\s+в\s+@([a-zA-Z0-9_]+)', 'username'),
+        (r'зайдите\s+в\s+@([a-zA-Z0-9_]+)', 'username'),
+        (r'join\s+@([a-zA-Z0-9_]+)', 'username'),
+        (r'subscribe\s+to\s+@([a-zA-Z0-9_]+)', 'username'),
     ]
     
-    for pattern, formatter in patterns:
+    for pattern, link_type in patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
         for match in matches:
-            link = formatter(match) if callable(formatter) else formatter
+            if link_type == 'username':
+                link = f'@{match}' if not match.startswith('@') else match
+            else:
+                link = f'https://t.me/joinchat/{match}' if 'joinchat' in pattern else f'https://t.me/{match}'
+            
             if link not in links:
                 links.append(link)
     
     return links
 
-async def join_link(client, link: str) -> tuple:
-    """Вступает по ссылке, возвращает (успех, сообщение)"""
+async def join_channel_or_group(client, link: str) -> tuple:
+    """Вступает в канал/группу через аккаунт пользователя"""
     try:
         if 'joinchat' in link or '+' in link or 'addlist' in link:
             hash_part = link.split('/')[-1].split('?')[0]
             await client(ImportChatInviteRequest(hash_part))
-            return True, "Вступил по пригласительной ссылке"
+            return True, "joined", "Вступил по пригласительной ссылке"
         else:
             clean_link = link.replace('https://t.me/', '@').replace('t.me/', '@')
             if not clean_link.startswith('@'):
                 clean_link = '@' + clean_link
             await client(JoinChannelRequest(clean_link))
-            return True, f"Вступил в {clean_link}"
+            return True, "joined", f"Вступил в {clean_link}"
     except UserAlreadyParticipantError:
-        return True, f"Уже участник"
+        return True, "already", f"Уже участник {link}"
+    except InviteRequestSentError:
+        return True, "pending", f"Отправлена заявка на вступление в {link}"
     except FloodWaitError as e:
         await asyncio.sleep(e.seconds)
-        return await join_link(client, link)
+        return await join_channel_or_group(client, link)
     except Exception as e:
-        return False, str(e)[:50]
+        error = str(e).lower()
+        if 'request' in error or 'заявк' in error:
+            try:
+                clean_link = link.replace('https://t.me/', '@').replace('t.me/', '@')
+                if not clean_link.startswith('@'):
+                    clean_link = '@' + clean_link
+                await client.send_message(clean_link, "/start")
+                return True, "pending", f"Отправлена заявка на вступление в {link}"
+            except:
+                return False, "error", str(e)[:50]
+        return False, "error", str(e)[:50]
 
-async def auto_join_all(client, group_entity, bot, uid) -> bool:
-    """Ищет ссылки в последних сообщениях и вступает"""
+async def auto_join_everything(client, group_entity, bot, uid) -> dict:
+    """
+    Через аккаунт пользователя подписывается на ВСЁ, что найдёт в сообщениях
+    Возвращает словарь с результатами
+    """
+    result = {'joined': 0, 'pending': 0, 'already': 0, 'errors': 0, 'links': []}
+    
     try:
+        await bot.send_message(uid, "🔍 Читаю последние сообщения в чате...")
+        
         # Получаем последние 30 сообщений
         messages = []
         async for msg in client.iter_messages(group_entity, limit=30):
@@ -243,79 +271,92 @@ async def auto_join_all(client, group_entity, bot, uid) -> bool:
                 messages.append(msg.text)
         
         if not messages:
-            return False
+            await bot.send_message(uid, "ℹ️ Нет сообщений для анализа")
+            return result
+        
+        await bot.send_message(uid, f"📝 Найдено {len(messages)} сообщений с текстом")
         
         # Собираем все ссылки из сообщений
         all_links = []
         for msg in messages:
-            links = await extract_links_from_text(msg)
+            links = await extract_all_links_from_text(msg)
             all_links.extend(links)
         
         all_links = list(dict.fromkeys(all_links))
+        result['links'] = all_links
         
         if not all_links:
-            await bot.send_message(uid, "ℹ️ Не найдено ссылок для вступления в сообщениях чата.")
-            return False
+            await bot.send_message(uid, "ℹ️ Не найдено ссылок для вступления в сообщениях")
+            return result
         
         await bot.send_message(uid, f"🔍 Найдено {len(all_links)} ссылок для вступления:\n" + "\n".join(all_links[:5]) + ("\n..." if len(all_links) > 5 else ""))
         
         # Вступаем по каждой ссылке
-        joined = 0
         for link in all_links[:10]:
-            success, msg_result = await join_link(client, link)
-            if success:
-                joined += 1
+            success, status, msg_result = await join_channel_or_group(client, link)
+            
+            if status == "joined":
+                result['joined'] += 1
                 await bot.send_message(uid, f"✅ {msg_result}")
+            elif status == "pending":
+                result['pending'] += 1
+                await bot.send_message(uid, f"📝 {msg_result}")
+            elif status == "already":
+                result['already'] += 1
+                await bot.send_message(uid, f"ℹ️ {msg_result}")
             else:
-                await bot.send_message(uid, f"❌ Не вступил: {msg_result}")
+                result['errors'] += 1
+                await bot.send_message(uid, f"❌ {msg_result}")
+            
             await asyncio.sleep(1.5)
         
-        return joined > 0
+        await bot.send_message(uid, f"📊 ИТОГ: вступил - {result['joined']}, заявок - {result['pending']}, уже был - {result['already']}, ошибок - {result['errors']}")
+        return result
         
     except Exception as e:
-        print(f"[AUTO_JOIN] Ошибка: {e}")
-        return False
+        await bot.send_message(uid, f"❌ Ошибка: {str(e)[:200]}")
+        return result
 
 async def send_with_auto_join(uid, bid, client, group, text, bot):
-    """Отправляет сообщение, при ошибке пытается вступить"""
-    # Сначала пробуем отправить
+    """Отправляет сообщение, при ошибке пытается вступить через аккаунт пользователя"""
+    
+    # Пробуем отправить
     try:
         await client.send_message(group, text)
         return True, "OK"
+        
     except FloodWaitError as e:
         await asyncio.sleep(e.seconds)
         return await send_with_auto_join(uid, bid, client, group, text, bot)
+        
     except (ChatWriteForbiddenError, ChannelPrivateError, UserBannedInChannelError) as e:
-        error_msg = str(e).lower()
+        error_msg = str(e)
+        await bot.send_message(uid, f"⚠️ Ошибка в {group}: {error_msg[:100]}")
         
-        # Ключевые слова, указывающие на необходимость вступления
-        join_keywords = [
-            'join', 'subscribe', 'подпишись', 'подписаться', 'канал', 'channel',
-            'вступить', 'вступай', 'чат', 'группа', 'group', 'участником',
-            'нельзя писать', 'write forbidden', 'banned', 'restricted'
-        ]
-        
-        if any(word in error_msg for word in join_keywords):
-            await bot.send_message(uid, f"🔍 Требуется вступление для отправки в {group}")
+        # Пытаемся получить сущность группы
+        try:
+            group_entity = await client.get_entity(group)
             
-            try:
-                group_entity = await client.get_entity(group)
-                joined = await auto_join_all(client, group_entity, bot, uid)
+            # Запускаем авто-вступление
+            result = await auto_join_everything(client, group_entity, bot, uid)
+            
+            if result['joined'] > 0 or result['pending'] > 0:
+                await bot.send_message(uid, f"✅ Выполнено вступлений: {result['joined']}, заявок: {result['pending']}")
+                await bot.send_message(uid, f"🔄 Повторная попытка отправки через 5 секунд...")
+                await asyncio.sleep(5)
                 
-                if joined:
-                    await bot.send_message(uid, f"✅ Вступил в найденные чаты/группы, пробую отправить снова...")
-                    await asyncio.sleep(3)
-                    try:
-                        await client.send_message(group, text)
-                        return True, "OK после вступления"
-                    except Exception as send_err:
-                        return False, f"Не отправилось после вступления: {str(send_err)[:50]}"
-                else:
-                    return False, "Не удалось найти ссылки для вступления"
-            except Exception as e2:
-                return False, f"Ошибка при проверке: {str(e2)[:50]}"
-        else:
-            return False, f"Нет прав для отправки: {str(e)[:100]}"
+                # Повторяем отправку
+                try:
+                    await client.send_message(group, text)
+                    return True, "OK после вступления"
+                except Exception as send_err:
+                    return False, f"Не отправилось после вступления: {str(send_err)[:50]}"
+            else:
+                return False, "Не удалось найти или вступить по ссылкам"
+                
+        except Exception as e2:
+            return False, f"Ошибка при проверке: {str(e2)[:100]}"
+            
     except Exception as e:
         return False, str(e)[:100]
 
@@ -457,7 +498,7 @@ async def button_handler(update: Update, context):
         await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал", HELP_MENU)
     
     elif data == 'help_auto':
-        await send_msg(uid, context.bot, "🤖 АВТО-ВСТУПЛЕНИЕ\n\nЕсли чат требует подписки или вступления:\n1. Бот читает последние 30 сообщений\n2. Находит все ссылки\n3. Автоматически вступает\n4. Повторяет отправку\n\n✅ Работает со всеми типами ссылок!", HELP_MENU)
+        await send_msg(uid, context.bot, "🤖 АВТО-ВСТУПЛЕНИЕ\n\nЕсли чат требует подписки или вступления:\n1. Бот читает последние 30 сообщений\n2. Находит все ссылки\n3. Автоматически вступает через ваш аккаунт\n4. Отправляет заявки на закрытые каналы\n5. Повторяет отправку\n\n✅ Работает со всеми типами ссылок!", HELP_MENU)
     
     elif data == 'clear_session':
         for tk in list(active_tasks.keys()):
@@ -632,7 +673,7 @@ async def start_broadcast(uid, bot, bid, client):
     
     bc['groups'] = valid
     save_data()
-    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Авто-вступление включено!")
+    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Авто-вступление через ваш аккаунт включено!")
     
     tk = f"{uid}_{bid}"
     task = asyncio.create_task(run_broadcast(uid, bid, client, valid, text, interval, media_path, has_photo, bot))
@@ -878,8 +919,9 @@ async def run():
     
     print("=" * 60)
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
-    print("🤖 АВТО-ВСТУПЛЕНИЕ АКТИВНО")
+    print("🤖 АВТО-ВСТУПЛЕНИЕ ЧЕРЕЗ ВАШ АККАУНТ")
     print("📌 ПОДДЕРЖИВАЕТ: @username, t.me/..., joinchat, +, addlist")
+    print("📝 ОТПРАВЛЯЕТ ЗАЯВКИ НА ЗАКРЫТЫЕ КАНАЛЫ")
     print("=" * 60)
     
     await start_server()
