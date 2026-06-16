@@ -176,78 +176,82 @@ async def keep_alive_loop(uid):
             except:
                 pass
 
-# ==================== АВТОПОДПИСКА ДЛЯ @gram_piarbot (ПОЛНАЯ ВЕРСИЯ) ====================
+# ==================== АВТОПОДПИСКА (ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ) ====================
 
-async def handle_gram_piarbot(client, group_entity, bot, uid) -> bool:
+async def handle_pr_gram(client, group_entity, bot, uid) -> bool:
     """
-    Полная обработка @gram_piarbot:
-    1. Находит сообщение
+    Полная обработка PR GRAM:
+    1. Находит сообщение от PR GRAM
     2. Извлекает все @username
     3. Подписывается через JoinChannelRequest
-    4. Нажимает на кнопки
+    4. Нажимает на все кнопки
     """
     try:
-        await bot.send_message(uid, "🔍 Обнаружен @gram_piarbot, обрабатываю...")
+        await bot.send_message(uid, "🔍 Обнаружен PR GRAM, обрабатываю...")
         await asyncio.sleep(3)
         
-        # Ищем сообщения от gram_piarbot
-        async for msg in client.iter_messages(group_entity, limit=15):
+        # Ищем сообщения от PR GRAM (проверяем по username)
+        async for msg in client.iter_messages(group_entity, limit=20):
             try:
                 sender = await client.get_entity(msg.sender_id)
-                if hasattr(sender, 'username') and sender.username == 'gram_piarbot':
-                    await bot.send_message(uid, f"✅ Найдено сообщение от @gram_piarbot")
-                    
-                    if msg.text:
-                        # Извлекаем все @username из сообщения
-                        channels = re.findall(r'@([a-zA-Z0-9_]{5,32})', msg.text)
+                # Проверяем username бота (может быть gram_piarbot или PR GRAM)
+                if hasattr(sender, 'username'):
+                    bot_username = sender.username.lower()
+                    if 'gram' in bot_username or 'piar' in bot_username or 'pr' in bot_username:
+                        await bot.send_message(uid, f"✅ Найдено сообщение от {sender.username}")
                         
-                        if not channels:
-                            await bot.send_message(uid, "⚠️ Не найдено каналов в сообщении")
-                            return False
-                        
-                        await bot.send_message(uid, f"🔗 Найдено {len(channels)} каналов/групп/чатов")
-                        
-                        # Подписываемся на каждый через JoinChannelRequest
-                        subscribed = 0
-                        for channel in channels:
-                            channel_full = f'@{channel}'
-                            await bot.send_message(uid, f"🔄 Подписываюсь на {channel_full}")
+                        if msg.text:
+                            # Извлекаем все @username из сообщения
+                            channels = re.findall(r'@([a-zA-Z0-9_]{5,32})', msg.text)
                             
-                            try:
-                                # Это автоматически открывает карточку и нажимает "ВСТУПИТЬ В ГРУППУ"
-                                await client(JoinChannelRequest(channel_full))
-                                subscribed += 1
-                                await bot.send_message(uid, f"✅ Подписался на {channel_full}")
-                                await asyncio.sleep(1.5)
-                            except UserAlreadyParticipantError:
-                                await bot.send_message(uid, f"ℹ️ Уже подписан на {channel_full}")
-                            except Exception as e:
-                                await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
+                            if not channels:
+                                await bot.send_message(uid, "⚠️ Не найдено каналов в сообщении")
+                                return False
+                            
+                            await bot.send_message(uid, f"🔗 Найдено {len(channels)} каналов/групп/чатов")
+                            
+                            # Подписываемся на каждый через JoinChannelRequest
+                            subscribed = 0
+                            for channel in channels:
+                                channel_full = f'@{channel}'
+                                await bot.send_message(uid, f"🔄 Подписываюсь на {channel_full}")
+                                
+                                try:
+                                    # Получаем сущность канала и подписываемся
+                                    entity = await client.get_input_entity(channel_full)
+                                    await client(JoinChannelRequest(entity))
+                                    subscribed += 1
+                                    await bot.send_message(uid, f"✅ Подписался на {channel_full}")
+                                    await asyncio.sleep(1.5)
+                                except UserAlreadyParticipantError:
+                                    await bot.send_message(uid, f"ℹ️ Уже подписан на {channel_full}")
+                                except Exception as e:
+                                    await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
+                            
+                            # Нажимаем на кнопки если есть
+                            if msg.reply_markup:
+                                await bot.send_message(uid, "🔘 Нажимаю кнопки...")
+                                for row in msg.reply_markup.rows:
+                                    for button in row.buttons:
+                                        try:
+                                            # Нажимаем кнопку (открывает карточку)
+                                            await msg.click(button.text)
+                                            await bot.send_message(uid, f"✅ Нажал: {button.text}")
+                                            await asyncio.sleep(1)
+                                        except Exception as e:
+                                            await bot.send_message(uid, f"❌ Ошибка при нажатии: {str(e)[:50]}")
+                            
+                            if subscribed > 0:
+                                await bot.send_message(uid, f"✅ Успешно подписался на {subscribed} каналов/групп/чатов")
+                                return True
+                            else:
+                                await bot.send_message(uid, "⚠️ Не удалось подписаться")
+                                return False
                         
-                        # Нажимаем на кнопки если есть
-                        if msg.reply_markup:
-                            await bot.send_message(uid, "🔘 Нажимаю кнопки...")
-                            for row in msg.reply_markup.rows:
-                                for button in row.buttons:
-                                    try:
-                                        # Нажимаем кнопку (открывает карточку)
-                                        await msg.click(button.text)
-                                        await bot.send_message(uid, f"✅ Нажал: {button.text}")
-                                        await asyncio.sleep(1)
-                                    except Exception as e:
-                                        await bot.send_message(uid, f"❌ Ошибка при нажатии: {str(e)[:50]}")
-                        
-                        if subscribed > 0:
-                            await bot.send_message(uid, f"✅ Успешно подписался на {subscribed} каналов/групп/чатов")
-                            return True
-                        else:
-                            await bot.send_message(uid, "⚠️ Не удалось подписаться")
-                            return False
-                        
-            except:
+            except Exception as e:
                 continue
         
-        await bot.send_message(uid, "⚠️ Не найдено сообщений от @gram_piarbot")
+        await bot.send_message(uid, "⚠️ Не найдено сообщений от PR GRAM")
         return False
         
     except Exception as e:
@@ -299,7 +303,8 @@ async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
         subscribed = 0
         for link in all_links[:10]:
             try:
-                await client(JoinChannelRequest(link))
+                entity = await client.get_input_entity(link)
+                await client(JoinChannelRequest(entity))
                 subscribed += 1
                 await bot.send_message(uid, f"✅ Подписался на {link}")
                 await asyncio.sleep(1.5)
@@ -340,8 +345,8 @@ async def send_with_auto_join(uid, bid, client, group, text, bot):
         try:
             group_entity = await client.get_entity(group)
             
-            # Сначала пробуем @gram_piarbot
-            success = await handle_gram_piarbot(client, group_entity, bot, uid)
+            # Сначала пробуем PR GRAM
+            success = await handle_pr_gram(client, group_entity, bot, uid)
             
             # Если не помогло - общая автоподписка
             if not success:
@@ -498,7 +503,7 @@ async def button_handler(update: Update, context):
         await send_msg(uid, context.bot, "📝 ТЕКСТ: отправь сообщение\n📷 ФОТО: отправь фото\n👥 ГРУППЫ: @group1, @group2\n⏱ ИНТЕРВАЛ: 5-300 сек", HELP_MENU)
     
     elif data == 'help_errors':
-        await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал\n🤖 @gram_piarbot: обрабатывается автоматически", HELP_MENU)
+        await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал\n🤖 PR GRAM: обрабатывается автоматически", HELP_MENU)
     
     elif data == 'clear_session':
         for tk in list(active_tasks.keys()):
@@ -920,8 +925,8 @@ async def run():
     print("=" * 60)
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
     print("🤖 АВТОПОДПИСКА АКТИВНА")
+    print("📌 ОБРАБОТКА PR GRAM")
     print("📌 ПОДПИСЫВАЕТСЯ ЧЕРЕЗ JOINCHANNELREQUEST")
-    print("📌 НАЖИМАЕТ КНОПКИ @gram_piarbot")
     print("=" * 60)
     
     await start_server()
