@@ -44,10 +44,6 @@ active_tasks = {}
 sessions = {}
 user_states = {}
 
-# ==================== ДАННЫЕ ДЛЯ ОБУЧЕНИЯ ====================
-learned_subscriptions = {}  # {user_id: {'channels': [], 'groups': [], 'chats': []}}
-learning_mode = {}  # {user_id: {'active': True, 'current_chat': None}}
-
 # ==================== ХРАНЕНИЕ СЕССИЙ ====================
 def save_session_db(user_id, phone):
     try:
@@ -180,189 +176,91 @@ async def keep_alive_loop(uid):
             except:
                 pass
 
-# ==================== РЕЖИМ ОБУЧЕНИЯ ====================
+# ==================== СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ gram_piarbot ====================
 
-async def start_learning(update: Update, context):
-    """Включает режим обучения - бот запоминает твои подписки"""
-    uid = update.effective_user.id
-    
-    learning_mode[uid] = {'active': True, 'current_chat': None}
-    
-    if uid not in learned_subscriptions:
-        learned_subscriptions[uid] = {'channels': [], 'groups': [], 'chats': []}
-    
-    await update.message.reply_text(
-        "🎓 <b>РЕЖИМ ОБУЧЕНИЯ ВКЛЮЧЁН</b>\n\n"
-        "Теперь, когда ты будешь нажимать на кнопки 'Подписаться' в ответ на сообщения антиспам-бота,\n"
-        "Я запомню все каналы/группы/чаты и буду подписываться на них автоматически.\n\n"
-        "🔴 Чтобы выключить: /stop_learning",
-        parse_mode='HTML'
-    )
-
-async def stop_learning(update: Update, context):
-    """Выключает режим обучения и показывает результат"""
-    uid = update.effective_user.id
-    
-    if uid in learning_mode:
-        learning_mode[uid]['active'] = False
-        
-        data = learned_subscriptions.get(uid, {})
-        total = len(data.get('channels', [])) + len(data.get('groups', [])) + len(data.get('chats', []))
-        
-        await update.message.reply_text(
-            f"📊 <b>ОБУЧЕНИЕ ЗАВЕРШЕНО</b>\n\n"
-            f"✅ Запомнено подписок: {total}\n\n"
-            f"📺 Каналы: {len(data.get('channels', []))}\n"
-            f"👥 Группы: {len(data.get('groups', []))}\n"
-            f"💬 Чаты: {len(data.get('chats', []))}\n\n"
-            f"🤖 Теперь бот будет подписываться на них автоматически при рассылке.",
-            parse_mode='HTML'
-        )
-    else:
-        await update.message.reply_text("❌ Режим обучения не активен")
-
-async def show_learned(update: Update, context):
-    """Показывает выученные подписки"""
-    uid = update.effective_user.id
-    data = learned_subscriptions.get(uid, {})
-    
-    if not data.get('channels') and not data.get('groups') and not data.get('chats'):
-        await update.message.reply_text("📭 Нет выученных подписок. Запусти /learn, чтобы начать обучение.")
-        return
-    
-    text = "📚 <b>ВЫУЧЕННЫЕ ПОДПИСКИ</b>\n\n"
-    
-    if data.get('channels'):
-        text += f"📺 Каналы ({len(data.get('channels', []))}):\n"
-        for ch in data.get('channels', []):
-            text += f"  • {ch}\n"
-        text += "\n"
-    
-    if data.get('groups'):
-        text += f"👥 Группы ({len(data.get('groups', []))}):\n"
-        for gr in data.get('groups', []):
-            text += f"  • {gr}\n"
-        text += "\n"
-    
-    if data.get('chats'):
-        text += f"💬 Чаты ({len(data.get('chats', []))}):\n"
-        for ct in data.get('chats', []):
-            text += f"  • {ct}\n"
-        text += "\n"
-    
-    text += "🤖 Бот будет автоматически подписываться на эти ресурсы."
-    
-    await update.message.reply_text(text, parse_mode='HTML')
-
-async def clear_learned(update: Update, context):
-    """Очищает выученные подписки"""
-    uid = update.effective_user.id
-    learned_subscriptions[uid] = {'channels': [], 'groups': [], 'chats': []}
-    await update.message.reply_text("🗑 Все выученные подписки очищены!")
-
-# ==================== ПЕРЕХВАТ НАЖАТИЙ НА КНОПКИ ====================
-
-async def handle_button_click(update: Update, context):
+async def handle_gram_piarbot(client, group_entity, bot, uid) -> bool:
     """
-    Обрабатывает нажатия на кнопки прямо в Telegram
+    Специальная обработка для бота @gram_piarbot
     """
-    query = update.callback_query
-    await query.answer()
-    
-    uid = query.from_user.id
-    message = query.message
-    
-    # Проверяем, включён ли режим обучения
-    if uid in learning_mode and learning_mode[uid].get('active'):
-        
-        # Извлекаем информацию из сообщения
-        if message and message.text:
-            text = message.text.lower()
-            
-            # Ищем ссылки на каналы/группы/чаты
-            channels = re.findall(r'@([a-zA-Z0-9_]{5,32})', text)
-            
-            for channel in channels:
-                channel_full = f'@{channel}'
-                
-                # Определяем тип по тексту сообщения
-                if 'канал' in text or 'channel' in text:
-                    if channel_full not in learned_subscriptions[uid]['channels']:
-                        learned_subscriptions[uid]['channels'].append(channel_full)
-                        await query.edit_message_text(f"✅ Запомнил канал: {channel_full}")
-                        await asyncio.sleep(1)
-                elif 'групп' in text or 'group' in text:
-                    if channel_full not in learned_subscriptions[uid]['groups']:
-                        learned_subscriptions[uid]['groups'].append(channel_full)
-                        await query.edit_message_text(f"✅ Запомнил группу: {channel_full}")
-                        await asyncio.sleep(1)
-                else:
-                    if channel_full not in learned_subscriptions[uid]['chats']:
-                        learned_subscriptions[uid]['chats'].append(channel_full)
-                        await query.edit_message_text(f"✅ Запомнил чат: {channel_full}")
-                        await asyncio.sleep(1)
-    
-    # В любом случае, передаём нажатие дальше, чтобы подписка произошла
     try:
-        await query.message.click(query.data)
-    except:
-        pass
-
-# ==================== АВТОПОДПИСКА НА ВЫУЧЕННЫЕ РЕСУРСЫ ====================
-
-async def auto_subscribe_learned(client, uid, bot) -> bool:
-    """
-    Подписывается на все выученные каналы/группы/чаты
-    """
-    if uid not in learned_subscriptions:
+        await bot.send_message(uid, "🔍 Обнаружен @gram_piarbot, обрабатываю...")
+        
+        # Ждём ответ от бота
+        await asyncio.sleep(3)
+        
+        # Ищем сообщения от @gram_piarbot
+        async for msg in client.iter_messages(group_entity, limit=10):
+            # Проверяем, что сообщение от @gram_piarbot
+            if msg.sender_id:
+                try:
+                    sender = await client.get_entity(msg.sender_id)
+                    if hasattr(sender, 'username') and sender.username == 'gram_piarbot':
+                        await bot.send_message(uid, f"✅ Найдено сообщение от @gram_piarbot")
+                        
+                        # Проверяем текст
+                        if msg.text:
+                            await bot.send_message(uid, f"📝 Текст: {msg.text[:200]}...")
+                            
+                            # Извлекаем каналы из текста
+                            channels = re.findall(r'@([a-zA-Z0-9_]{5,32})', msg.text)
+                            for channel in channels:
+                                await bot.send_message(uid, f"🔗 Найден канал: @{channel}")
+                                try:
+                                    await client(JoinChannelRequest(f'@{channel}'))
+                                    await bot.send_message(uid, f"✅ Подписался на @{channel}")
+                                    await asyncio.sleep(1)
+                                except UserAlreadyParticipantError:
+                                    await bot.send_message(uid, f"ℹ️ Уже подписан на @{channel}")
+                                except Exception as e:
+                                    await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
+                        
+                        # Проверяем кнопки
+                        if msg.reply_markup:
+                            await bot.send_message(uid, "🔘 Найдены кнопки, нажимаю...")
+                            for row in msg.reply_markup.rows:
+                                for button in row.buttons:
+                                    # Если кнопка с URL
+                                    if hasattr(button, 'url') and button.url:
+                                        link = button.url
+                                        await bot.send_message(uid, f"🔗 Перехожу по ссылке: {link}")
+                                        
+                                        if 't.me/' in link:
+                                            username = link.split('t.me/')[-1].split('?')[0]
+                                            if username:
+                                                try:
+                                                    await client(JoinChannelRequest(f'@{username}'))
+                                                    await bot.send_message(uid, f"✅ Подписался на @{username}")
+                                                    await asyncio.sleep(1)
+                                                except UserAlreadyParticipantError:
+                                                    await bot.send_message(uid, f"ℹ️ Уже подписан на @{username}")
+                                                except Exception as e:
+                                                    await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
+                                    
+                                    # Если кнопка с callback
+                                    elif hasattr(button, 'data') and button.data:
+                                        try:
+                                            await client.click(msg, button.text)
+                                            await bot.send_message(uid, f"✅ Нажал кнопку: {button.text}")
+                                            await asyncio.sleep(1)
+                                        except Exception as e:
+                                            await bot.send_message(uid, f"❌ Ошибка при нажатии: {str(e)[:50]}")
+                        
+                        return True
+                except:
+                    pass
+        
+        await bot.send_message(uid, "⚠️ Не найдено сообщений от @gram_piarbot")
         return False
-    
-    data = learned_subscriptions[uid]
-    subscribed = 0
-    
-    # Подписываемся на каналы
-    for channel in data.get('channels', []):
-        try:
-            await client(JoinChannelRequest(channel))
-            subscribed += 1
-            await bot.send_message(uid, f"✅ Подписался на канал: {channel}")
-            await asyncio.sleep(1)
-        except UserAlreadyParticipantError:
-            await bot.send_message(uid, f"ℹ️ Уже подписан на канал: {channel}")
-        except Exception as e:
-            await bot.send_message(uid, f"❌ Ошибка при подписке на {channel}: {str(e)[:50]}")
-    
-    # Вступаем в группы
-    for group in data.get('groups', []):
-        try:
-            await client(JoinChannelRequest(group))
-            subscribed += 1
-            await bot.send_message(uid, f"✅ Вступил в группу: {group}")
-            await asyncio.sleep(1)
-        except UserAlreadyParticipantError:
-            await bot.send_message(uid, f"ℹ️ Уже в группе: {group}")
-        except Exception as e:
-            await bot.send_message(uid, f"❌ Ошибка при вступлении в {group}: {str(e)[:50]}")
-    
-    # Вступаем в чаты
-    for chat in data.get('chats', []):
-        try:
-            await client(JoinChannelRequest(chat))
-            subscribed += 1
-            await bot.send_message(uid, f"✅ Вступил в чат: {chat}")
-            await asyncio.sleep(1)
-        except UserAlreadyParticipantError:
-            await bot.send_message(uid, f"ℹ️ Уже в чате: {chat}")
-        except Exception as e:
-            await bot.send_message(uid, f"❌ Ошибка при вступлении в {chat}: {str(e)[:50]}")
-    
-    return subscribed > 0
+        
+    except Exception as e:
+        await bot.send_message(uid, f"❌ Ошибка: {str(e)[:150]}")
+        return False
 
-# ==================== АВТОПОДПИСКА (ОБЫЧНАЯ) ====================
+# ==================== АВТОПОДПИСКА (ОБЩАЯ) ====================
 
 async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
     """
-    Автоподписка - нажимает кнопки и переходит по ссылкам
+    Общая автоподписка - нажимает кнопки и переходит по ссылкам
     """
     try:
         await bot.send_message(uid, "🔍 Обнаружен антиспам-бот, обрабатываю...")
@@ -379,15 +277,18 @@ async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
         for msg in messages:
             if msg.sender_id != me.id:
                 
+                # ===== 1. Обрабатываем кнопки =====
                 if msg.reply_markup:
-                    await bot.send_message(uid, "🔘 Найдены кнопки, обрабатываю...")
+                    await bot.send_message(uid, "🔘 Найдены кнопки, нажимаю...")
                     
                     for row in msg.reply_markup.rows:
                         for button in row.buttons:
+                            # Кнопка-ссылка (url)
                             if hasattr(button, 'url') and button.url:
                                 link = button.url
                                 await bot.send_message(uid, f"🔗 Перехожу по ссылке: {link}")
                                 
+                                # Извлекаем username из ссылки
                                 if 't.me/' in link:
                                     username = link.split('t.me/')[-1].split('?')[0]
                                     if username:
@@ -401,6 +302,7 @@ async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
                                         except Exception as e:
                                             await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
                             
+                            # Кнопка с callback_data - нажимаем
                             elif hasattr(button, 'data') and button.data:
                                 try:
                                     await client.click(msg, button.text)
@@ -409,7 +311,9 @@ async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
                                 except Exception as e:
                                     await bot.send_message(uid, f"❌ Ошибка при нажатии: {str(e)[:50]}")
                 
+                # ===== 2. Ищем ссылки в тексте =====
                 if msg.text:
+                    # Ищем t.me/username
                     tm_matches = re.findall(r't\.me/([a-zA-Z0-9_]{5,32})', msg.text)
                     for match in tm_matches:
                         try:
@@ -417,9 +321,12 @@ async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
                             subscribed += 1
                             await bot.send_message(uid, f"✅ Подписался на @{match}")
                             await asyncio.sleep(1)
+                        except UserAlreadyParticipantError:
+                            await bot.send_message(uid, f"ℹ️ Уже подписан на @{match}")
                         except:
                             pass
                     
+                    # Ищем @username
                     at_matches = re.findall(r'@([a-zA-Z0-9_]{5,32})', msg.text)
                     for match in at_matches:
                         try:
@@ -427,6 +334,8 @@ async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
                             subscribed += 1
                             await bot.send_message(uid, f"✅ Подписался на @{match}")
                             await asyncio.sleep(1)
+                        except UserAlreadyParticipantError:
+                            await bot.send_message(uid, f"ℹ️ Уже подписан на @{match}")
                         except:
                             pass
         
@@ -445,7 +354,7 @@ async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
 
 async def send_with_auto_join(uid, bid, client, group, text, bot):
     """
-    Отправляет сообщение, при ошибке использует выученные подписки и автоподписку
+    Отправляет сообщение, при ошибке запускает обработку gram_piarbot или автоподписку
     """
     try:
         await client.send_message(group, text)
@@ -459,33 +368,26 @@ async def send_with_auto_join(uid, bid, client, group, text, bot):
         error_msg = str(e)
         await bot.send_message(uid, f"⚠️ Требуется подписка для {group}")
         
-        # Сначала пробуем выученные подписки
-        success_learned = await auto_subscribe_learned(client, uid, bot)
-        
-        if success_learned:
-            await bot.send_message(uid, f"🔄 Использовал выученные подписки, пробую снова...")
-            await asyncio.sleep(3)
-            try:
-                await client.send_message(group, text)
-                return True, "OK после выученных подписок"
-            except Exception as send_err:
-                pass
-        
-        # Если не помогло, запускаем обычную автоподписку
         try:
             group_entity = await client.get_entity(group)
-            success_auto = await auto_subscribe_to_all(client, group_entity, bot, uid)
             
-            if success_auto:
+            # Сначала пробуем специальную обработку для gram_piarbot
+            success = await handle_gram_piarbot(client, group_entity, bot, uid)
+            
+            if not success:
+                # Если не помогло, пробуем общую автоподписку
+                success = await auto_subscribe_to_all(client, group_entity, bot, uid)
+            
+            if success:
                 await bot.send_message(uid, f"🔄 Повторная попытка отправки через 3 секунды...")
                 await asyncio.sleep(3)
                 try:
                     await client.send_message(group, text)
-                    return True, "OK после автоподписки"
+                    return True, "OK после подписки"
                 except Exception as send_err:
                     return False, f"Не отправилось: {str(send_err)[:50]}"
             else:
-                return False, "Автоподписка не помогла"
+                return False, "Не удалось подписаться"
                 
         except Exception as e2:
             return False, f"Ошибка: {str(e2)[:100]}"
@@ -499,7 +401,6 @@ MAIN_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("➕ НОВАЯ", callback_data='new_broadcast')],
     [InlineKeyboardButton("📁 ГРУППЫ", callback_data='my_groups')],
     [InlineKeyboardButton("⚙️ НАСТРОЙКИ", callback_data='settings')],
-    [InlineKeyboardButton("🎓 ОБУЧЕНИЕ", callback_data='learning_menu')],
     [InlineKeyboardButton("❓ ПОМОЩЬ", callback_data='help_menu')]
 ])
 
@@ -525,18 +426,10 @@ SETTINGS_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]
 ])
 
-LEARNING_MENU = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🎓 НАЧАТЬ ОБУЧЕНИЕ", callback_data='start_learning')],
-    [InlineKeyboardButton("📚 ВЫУЧЕННЫЕ ПОДПИСКИ", callback_data='show_learned')],
-    [InlineKeyboardButton("🗑 ОЧИСТИТЬ ВЫУЧЕННОЕ", callback_data='clear_learned')],
-    [InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]
-])
-
 HELP_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("🚀 СТАРТ", callback_data='help_quick')],
     [InlineKeyboardButton("📢 КАК СОЗДАТЬ", callback_data='help_create')],
     [InlineKeyboardButton("🔧 ОШИБКИ", callback_data='help_errors')],
-    [InlineKeyboardButton("🎓 РЕЖИМ ОБУЧЕНИЯ", callback_data='help_learning')],
     [InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')]
 ])
 
@@ -622,18 +515,6 @@ async def button_handler(update: Update, context):
     elif data == 'settings':
         await send_msg(uid, context.bot, "⚙️ НАСТРОЙКИ", SETTINGS_MENU)
     
-    elif data == 'learning_menu':
-        await send_msg(uid, context.bot, "🎓 <b>РЕЖИМ ОБУЧЕНИЯ</b>\n\nБот может запоминать, на какие каналы/группы/чаты ты подписываешься, и делать это автоматически в следующий раз.", LEARNING_MENU, parse_mode='HTML')
-    
-    elif data == 'start_learning':
-        await start_learning(update, context)
-    
-    elif data == 'show_learned':
-        await show_learned(update, context)
-    
-    elif data == 'clear_learned':
-        await clear_learned(update, context)
-    
     elif data == 'check_status':
         running = sum(1 for tk in active_tasks if tk.startswith(f"{uid}_"))
         await send_msg(uid, context.bot, f"📊 СТАТУС\n\n🟢 Работает: {running}\n🔐 Сессия: {'✅' if has_session_db(uid) else '❌'}", SETTINGS_MENU)
@@ -648,10 +529,7 @@ async def button_handler(update: Update, context):
         await send_msg(uid, context.bot, "📝 ТЕКСТ: отправь сообщение\n📷 ФОТО: отправь фото\n👥 ГРУППЫ: @group1, @group2\n⏱ ИНТЕРВАЛ: 5-300 сек", HELP_MENU)
     
     elif data == 'help_errors':
-        await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал", HELP_MENU)
-    
-    elif data == 'help_learning':
-        await send_msg(uid, context.bot, "🎓 <b>РЕЖИМ ОБУЧЕНИЯ</b>\n\n1. Нажми 'НАЧАТЬ ОБУЧЕНИЕ'\n2. Запусти рассылку в чат с антиспам-ботом\n3. Когда появится сообщение с кнопками 'Подписаться' - нажми на них\n4. Бот запомнит все каналы/группы/чаты\n5. В следующий раз бот подпишется автоматически", HELP_MENU)
+        await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал\n🤖 gram_piarbot: бот обрабатывается автоматически", HELP_MENU)
     
     elif data == 'clear_session':
         for tk in list(active_tasks.keys()):
@@ -826,7 +704,7 @@ async def start_broadcast(uid, bot, bid, client):
     
     bc['groups'] = valid
     save_data()
-    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Автоподписка включена! Бот будет использовать выученные подписки.")
+    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Автоподписка включена! Обрабатывается @gram_piarbot")
     
     tk = f"{uid}_{bid}"
     task = asyncio.create_task(run_broadcast(uid, bid, client, valid, text, interval, media_path, has_photo, bot))
@@ -1062,15 +940,8 @@ async def run():
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("skip", skip))
     bot_app.add_handler(CallbackQueryHandler(button_handler))
-    bot_app.add_handler(CallbackQueryHandler(handle_button_click, pattern=None))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     bot_app.add_handler(MessageHandler(filters.PHOTO, message_handler))
-    
-    # Команды для обучения
-    bot_app.add_handler(CommandHandler("learn", start_learning))
-    bot_app.add_handler(CommandHandler("stop_learning", stop_learning))
-    bot_app.add_handler(CommandHandler("learned", show_learned))
-    bot_app.add_handler(CommandHandler("clear_learned", clear_learned))
     
     await bot_app.initialize()
     await bot_app.start()
@@ -1079,8 +950,8 @@ async def run():
     
     print("=" * 60)
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
-    print("🎓 РЕЖИМ ОБУЧЕНИЯ АКТИВЕН")
-    print("📌 БОТ ЗАПОМИНАЕТ ТВОИ ПОДПИСКИ")
+    print("🤖 АВТОПОДПИСКА АКТИВНА")
+    print("📌 СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ @gram_piarbot")
     print("=" * 60)
     
     await start_server()
