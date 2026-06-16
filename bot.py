@@ -176,7 +176,46 @@ async def keep_alive_loop(uid):
             except:
                 pass
 
-# ==================== АВТОПОДПИСКА (ЧЕРЕЗ АККАУНТ ПОЛЬЗОВАТЕЛЯ) ====================
+# ==================== ТЕСТОВАЯ КОМАНДА ДЛЯ ПРОВЕРКИ ПОДПИСКИ ====================
+
+async def test_subscribe(update: Update, context):
+    """Тестовая команда для диагностики подписки"""
+    uid = update.effective_user.id
+    await update.message.reply_text(
+        "📝 Введите @username канала для подписки:\n\n"
+        "Пример: @durov\n\n"
+        "Эта команда проверит, работает ли подписка через ваш аккаунт."
+    )
+    user_states[uid] = {'step': 'test_subscribe'}
+
+async def test_subscribe_step(update: Update, context):
+    uid = update.effective_user.id
+    channel = update.message.text.strip()
+    
+    if not channel.startswith('@'):
+        channel = '@' + channel
+    
+    client = await get_client(uid)
+    if not client:
+        await update.message.reply_text("❌ Нет активной сессии. Сначала авторизуйтесь через бота.")
+        return
+    
+    await update.message.reply_text(f"🔄 Пробую подписаться на {channel}...")
+    
+    try:
+        # Пробуем подписаться через аккаунт пользователя
+        await client(JoinChannelRequest(channel))
+        await update.message.reply_text(f"✅ УСПЕШНО ПОДПИСАЛСЯ на {channel}")
+    except UserAlreadyParticipantError:
+        await update.message.reply_text(f"ℹ️ Уже подписан на {channel}")
+    except FloodWaitError as e:
+        await update.message.reply_text(f"⏳ Флуд-контроль: жди {e.seconds} сек")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}\n\nВозможно, канал приватный или требует подтверждения.")
+    
+    del user_states[uid]
+
+# ==================== АВТОПОДПИСКА ====================
 
 async def handle_antispam_bot(client, group_entity, bot, uid) -> bool:
     """
@@ -197,7 +236,7 @@ async def handle_antispam_bot(client, group_entity, bot, uid) -> bool:
                 
                 # Проверяем, что это бот
                 if sender.bot:
-                    await bot.send_message(uid, f"✅ Найдено сообщение от бота")
+                    await bot.send_message(uid, f"✅ Найдено сообщение от бота: {sender.username or 'бот'}")
                     
                     if not msg.text:
                         continue
@@ -918,6 +957,7 @@ async def run():
     bot_app = Application.builder().token(BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("skip", skip))
+    bot_app.add_handler(CommandHandler("testsub", test_subscribe))
     bot_app.add_handler(CallbackQueryHandler(button_handler))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     bot_app.add_handler(MessageHandler(filters.PHOTO, message_handler))
@@ -931,6 +971,7 @@ async def run():
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
     print("🤖 АВТОПОДПИСКА АКТИВНА")
     print("📌 ПОДПИСЫВАЕТСЯ ЧЕРЕЗ ВАШ АККАУНТ")
+    print("📌 ДЛЯ ТЕСТА ИСПОЛЬЗУЙ /testsub @channel")
     print("=" * 60)
 
     await start_server()
