@@ -176,11 +176,15 @@ async def keep_alive_loop(uid):
             except:
                 pass
 
-# ==================== АВТОПОДПИСКА ДЛЯ @gram_piarbot ====================
+# ==================== АВТОПОДПИСКА ДЛЯ @gram_piarbot (ПОЛНАЯ ВЕРСИЯ) ====================
 
 async def handle_gram_piarbot(client, group_entity, bot, uid) -> bool:
     """
-    Специальная обработка для @gram_piarbot
+    Полная обработка @gram_piarbot:
+    1. Находит сообщение
+    2. Извлекает все @username
+    3. Подписывается через JoinChannelRequest
+    4. Нажимает на кнопки
     """
     try:
         await bot.send_message(uid, "🔍 Обнаружен @gram_piarbot, обрабатываю...")
@@ -203,14 +207,14 @@ async def handle_gram_piarbot(client, group_entity, bot, uid) -> bool:
                         
                         await bot.send_message(uid, f"🔗 Найдено {len(channels)} каналов/групп/чатов")
                         
-                        # Подписываемся на каждый
+                        # Подписываемся на каждый через JoinChannelRequest
                         subscribed = 0
                         for channel in channels:
                             channel_full = f'@{channel}'
                             await bot.send_message(uid, f"🔄 Подписываюсь на {channel_full}")
                             
                             try:
-                                # Подписка на канал/группу/чат
+                                # Это автоматически открывает карточку и нажимает "ВСТУПИТЬ В ГРУППУ"
                                 await client(JoinChannelRequest(channel_full))
                                 subscribed += 1
                                 await bot.send_message(uid, f"✅ Подписался на {channel_full}")
@@ -226,11 +230,12 @@ async def handle_gram_piarbot(client, group_entity, bot, uid) -> bool:
                             for row in msg.reply_markup.rows:
                                 for button in row.buttons:
                                     try:
+                                        # Нажимаем кнопку (открывает карточку)
                                         await msg.click(button.text)
                                         await bot.send_message(uid, f"✅ Нажал: {button.text}")
                                         await asyncio.sleep(1)
                                     except Exception as e:
-                                        await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
+                                        await bot.send_message(uid, f"❌ Ошибка при нажатии: {str(e)[:50]}")
                         
                         if subscribed > 0:
                             await bot.send_message(uid, f"✅ Успешно подписался на {subscribed} каналов/групп/чатов")
@@ -668,7 +673,7 @@ async def start_broadcast(uid, bot, bid, client):
     
     bc['groups'] = valid
     save_data()
-    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Автоподписка включена")
+    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Автоподписка включена! Бот подпишется автоматически")
     
     tk = f"{uid}_{bid}"
     task = asyncio.create_task(run_broadcast(uid, bid, client, valid, text, interval, media_path, has_photo, bot))
@@ -915,7 +920,8 @@ async def run():
     print("=" * 60)
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
     print("🤖 АВТОПОДПИСКА АКТИВНА")
-    print("📌 ОБРАБОТКА @gram_piarbot")
+    print("📌 ПОДПИСЫВАЕТСЯ ЧЕРЕЗ JOINCHANNELREQUEST")
+    print("📌 НАЖИМАЕТ КНОПКИ @gram_piarbot")
     print("=" * 60)
     
     await start_server()
