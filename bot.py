@@ -8,10 +8,10 @@ import shutil
 from datetime import datetime
 from telethon import TelegramClient, errors
 from telethon.errors import (
-    SessionPasswordNeededError, 
-    PhoneCodeInvalidError, 
-    FloodWaitError, 
-    AuthKeyError, 
+    SessionPasswordNeededError,
+    PhoneCodeInvalidError,
+    FloodWaitError,
+    AuthKeyError,
     RPCError,
     ChatWriteForbiddenError,
     ChannelPrivateError,
@@ -152,10 +152,10 @@ async def get_client(uid):
             del sessions[uid]
         except:
             pass
-    
+
     session_file = get_session_path(uid)
     client = TelegramClient(session_file, API_ID, API_HASH)
-    
+
     try:
         await client.connect()
         if await client.is_user_authorized():
@@ -176,7 +176,7 @@ async def keep_alive_loop(uid):
             except:
                 pass
 
-# ==================== АВТОПОДПИСКА (ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ) ====================
+# ==================== АВТОПОДПИСКА (ИСПРАВЛЕННАЯ) ====================
 
 async def handle_pr_gram(client, group_entity, bot, uid) -> bool:
     """
@@ -184,78 +184,101 @@ async def handle_pr_gram(client, group_entity, bot, uid) -> bool:
     1. Находит сообщение от PR GRAM
     2. Извлекает все @username
     3. Подписывается через JoinChannelRequest
-    4. Нажимает на все кнопки
+    4. Нажимает на кнопки
     """
     try:
-        await bot.send_message(uid, "🔍 Обнаружен PR GRAM, обрабатываю...")
+        await bot.send_message(uid, "🔍 Обнаружен антиспам-бот, обрабатываю...")
         await asyncio.sleep(3)
-        
-        # Ищем сообщения от PR GRAM (проверяем по username)
+
+        # Ищем сообщения от антиспам-бота
         async for msg in client.iter_messages(group_entity, limit=20):
             try:
+                # Получаем отправителя
                 sender = await client.get_entity(msg.sender_id)
-                # Проверяем username бота (может быть gram_piarbot или PR GRAM)
-                if hasattr(sender, 'username'):
-                    bot_username = sender.username.lower()
-                    if 'gram' in bot_username or 'piar' in bot_username or 'pr' in bot_username:
-                        await bot.send_message(uid, f"✅ Найдено сообщение от {sender.username}")
-                        
-                        if msg.text:
-                            # Извлекаем все @username из сообщения
-                            channels = re.findall(r'@([a-zA-Z0-9_]{5,32})', msg.text)
-                            
-                            if not channels:
-                                await bot.send_message(uid, "⚠️ Не найдено каналов в сообщении")
-                                return False
-                            
-                            await bot.send_message(uid, f"🔗 Найдено {len(channels)} каналов/групп/чатов")
-                            
-                            # Подписываемся на каждый через JoinChannelRequest
-                            subscribed = 0
-                            for channel in channels:
-                                channel_full = f'@{channel}'
-                                await bot.send_message(uid, f"🔄 Подписываюсь на {channel_full}")
-                                
-                                try:
-                                    # Получаем сущность канала и подписываемся
-                                    entity = await client.get_input_entity(channel_full)
-                                    await client(JoinChannelRequest(entity))
-                                    subscribed += 1
-                                    await bot.send_message(uid, f"✅ Подписался на {channel_full}")
-                                    await asyncio.sleep(1.5)
-                                except UserAlreadyParticipantError:
-                                    await bot.send_message(uid, f"ℹ️ Уже подписан на {channel_full}")
-                                except Exception as e:
-                                    await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
-                            
-                            # Нажимаем на кнопки если есть
-                            if msg.reply_markup:
-                                await bot.send_message(uid, "🔘 Нажимаю кнопки...")
-                                for row in msg.reply_markup.rows:
-                                    for button in row.buttons:
-                                        try:
-                                            # Нажимаем кнопку (открывает карточку)
-                                            await msg.click(button.text)
-                                            await bot.send_message(uid, f"✅ Нажал: {button.text}")
-                                            await asyncio.sleep(1)
-                                        except Exception as e:
-                                            await bot.send_message(uid, f"❌ Ошибка при нажатии: {str(e)[:50]}")
-                            
-                            if subscribed > 0:
-                                await bot.send_message(uid, f"✅ Успешно подписался на {subscribed} каналов/групп/чатов")
-                                return True
-                            else:
-                                await bot.send_message(uid, "⚠️ Не удалось подписаться")
-                                return False
-                        
+
+                # Проверяем, что это бот (по username)
+                is_antispam_bot = False
+                if hasattr(sender, 'username') and sender.username:
+                    username = sender.username.lower()
+                    # Проверяем разные возможные имена антиспам-ботов
+                    antispam_names = ['gram', 'piar', 'pr', 'antispam', 'spam', 'bot']
+                    if any(name in username for name in antispam_names):
+                        is_antispam_bot = True
+
+                # Также проверяем по имени, если username нет
+                if not is_antispam_bot and hasattr(sender, 'first_name') and sender.first_name:
+                    name = sender.first_name.lower()
+                    if 'pr' in name or 'gram' in name or 'anti' in name:
+                        is_antispam_bot = True
+
+                if not is_antispam_bot:
+                    continue
+
+                await bot.send_message(uid, f"✅ Найдено сообщение от антиспам-бота")
+
+                if not msg.text:
+                    await bot.send_message(uid, "⚠️ Сообщение без текста")
+                    return False
+
+                # Извлекаем все @username из сообщения
+                channels = re.findall(r'@([a-zA-Z0-9_]{5,32})', msg.text)
+
+                if not channels:
+                    await bot.send_message(uid, "⚠️ Не найдено каналов в сообщении")
+                    return False
+
+                await bot.send_message(uid, f"🔗 Найдено {len(channels)} каналов/групп/чатов")
+
+                # Подписываемся на каждый через JoinChannelRequest
+                subscribed = 0
+                for channel in channels:
+                    channel_full = f'@{channel}'
+                    await bot.send_message(uid, f"🔄 Подписываюсь на {channel_full}")
+
+                    try:
+                        # Получаем сущность канала и подписываемся
+                        entity = await client.get_entity(channel_full)
+                        await client(JoinChannelRequest(entity))
+                        subscribed += 1
+                        await bot.send_message(uid, f"✅ Подписался на {channel_full}")
+                        await asyncio.sleep(1.5)
+                    except UserAlreadyParticipantError:
+                        await bot.send_message(uid, f"ℹ️ Уже подписан на {channel_full}")
+                    except FloodWaitError as e:
+                        await bot.send_message(uid, f"⏳ Флуд, жду {e.seconds} сек")
+                        await asyncio.sleep(e.seconds)
+                    except Exception as e:
+                        await bot.send_message(uid, f"❌ Ошибка подписки на {channel_full}: {str(e)[:50]}")
+
+                # Нажимаем на кнопки если есть
+                if msg.reply_markup:
+                    await bot.send_message(uid, "🔘 Нажимаю кнопки...")
+                    for row in msg.reply_markup.rows:
+                        for button in row.buttons:
+                            try:
+                                # Нажимаем кнопку
+                                await msg.click(button.text)
+                                await bot.send_message(uid, f"✅ Нажал: {button.text}")
+                                await asyncio.sleep(1)
+                            except Exception as e:
+                                await bot.send_message(uid, f"❌ Ошибка при нажатии {button.text}: {str(e)[:50]}")
+
+                if subscribed > 0:
+                    await bot.send_message(uid, f"✅ Успешно подписался на {subscribed} каналов/групп/чатов")
+                    return True
+                else:
+                    await bot.send_message(uid, "⚠️ Не удалось подписаться ни на один канал")
+                    return False
+
             except Exception as e:
+                await bot.send_message(uid, f"⚠️ Ошибка обработки сообщения: {str(e)[:50]}")
                 continue
-        
-        await bot.send_message(uid, "⚠️ Не найдено сообщений от PR GRAM")
+
+        await bot.send_message(uid, "⚠️ Не найдено сообщений от антиспам-бота")
         return False
-        
+
     except Exception as e:
-        await bot.send_message(uid, f"❌ Ошибка: {str(e)[:150]}")
+        await bot.send_message(uid, f"❌ Критическая ошибка: {str(e)[:150]}")
         return False
 
 # ==================== ОБЩАЯ АВТОПОДПИСКА ====================
@@ -266,16 +289,16 @@ async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
     """
     try:
         await bot.send_message(uid, "🔍 Ищу ссылки в сообщениях...")
-        
+
         messages = []
         async for msg in client.iter_messages(group_entity, limit=15):
             if msg.text:
                 messages.append(msg)
-        
+
         if not messages:
             await bot.send_message(uid, "⚠️ Нет сообщений для анализа")
             return False
-        
+
         # Собираем все ссылки
         all_links = []
         for msg in messages:
@@ -285,41 +308,44 @@ async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
                 link = f'@{match}'
                 if link not in all_links:
                     all_links.append(link)
-            
+
             # Ищем t.me/username
             tm_matches = re.findall(r't\.me/([a-zA-Z0-9_]{5,32})', msg.text)
             for match in tm_matches:
                 link = f'@{match}'
                 if link not in all_links:
                     all_links.append(link)
-        
+
         if not all_links:
             await bot.send_message(uid, "⚠️ Не найдено ссылок в сообщениях")
             return False
-        
+
         await bot.send_message(uid, f"🔗 Найдено {len(all_links)} ссылок")
-        
+
         # Подписываемся на каждую
         subscribed = 0
         for link in all_links[:10]:
             try:
-                entity = await client.get_input_entity(link)
+                entity = await client.get_entity(link)
                 await client(JoinChannelRequest(entity))
                 subscribed += 1
                 await bot.send_message(uid, f"✅ Подписался на {link}")
                 await asyncio.sleep(1.5)
             except UserAlreadyParticipantError:
                 await bot.send_message(uid, f"ℹ️ Уже подписан на {link}")
+            except FloodWaitError as e:
+                await bot.send_message(uid, f"⏳ Флуд, жду {e.seconds} сек")
+                await asyncio.sleep(e.seconds)
             except Exception as e:
                 await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
-        
+
         if subscribed > 0:
             await bot.send_message(uid, f"✅ Подписался на {subscribed} каналов/групп/чатов")
             return True
         else:
             await bot.send_message(uid, "⚠️ Не удалось подписаться")
             return False
-        
+
     except Exception as e:
         await bot.send_message(uid, f"❌ Ошибка: {str(e)[:150]}")
         return False
@@ -333,25 +359,25 @@ async def send_with_auto_join(uid, bid, client, group, text, bot):
     try:
         await client.send_message(group, text)
         return True, "OK"
-        
+
     except FloodWaitError as e:
         await asyncio.sleep(e.seconds)
         return await send_with_auto_join(uid, bid, client, group, text, bot)
-        
+
     except (ChatWriteForbiddenError, ChannelPrivateError, UserBannedInChannelError) as e:
         error_msg = str(e)
         await bot.send_message(uid, f"⚠️ Требуется подписка для {group}")
-        
+
         try:
             group_entity = await client.get_entity(group)
-            
+
             # Сначала пробуем PR GRAM
             success = await handle_pr_gram(client, group_entity, bot, uid)
-            
+
             # Если не помогло - общая автоподписка
             if not success:
                 success = await auto_subscribe_to_all(client, group_entity, bot, uid)
-            
+
             if success:
                 await bot.send_message(uid, f"🔄 Повторная попытка через 3 секунды...")
                 await asyncio.sleep(3)
@@ -362,10 +388,10 @@ async def send_with_auto_join(uid, bid, client, group, text, bot):
                     return False, f"Не отправилось: {str(send_err)[:50]}"
             else:
                 return False, "Не удалось подписаться"
-                
+
         except Exception as e2:
             return False, f"Ошибка: {str(e2)[:100]}"
-            
+
     except Exception as e:
         return False, str(e)[:100]
 
@@ -450,15 +476,15 @@ async def button_handler(update: Update, context):
     await query.answer()
     uid = query.from_user.id
     data = query.data
-    
+
     try:
         await query.message.delete()
     except:
         pass
-    
+
     if data == 'back_to_main':
         await main_menu(uid, context.bot)
-    
+
     elif data == 'my_broadcasts':
         broadcasts = user_data[uid].get('broadcasts', [])
         if not broadcasts:
@@ -472,39 +498,39 @@ async def button_handler(update: Update, context):
         kb.append([InlineKeyboardButton("➕ НОВАЯ", callback_data='new_broadcast')])
         kb.append([InlineKeyboardButton("🔙 НАЗАД", callback_data='back_to_main')])
         await context.bot.send_message(uid, "📋 ВАШИ РАССЫЛКИ", reply_markup=InlineKeyboardMarkup(kb))
-    
+
     elif data == 'new_broadcast':
         new_id = len(user_data[uid].get('broadcasts', []))
         user_data[uid]['broadcasts'].append({'name': f'Рассылка {new_id+1}', 'text': None, 'groups': [], 'interval': 30, 'sent': 0})
         save_data()
         await show_broadcast(uid, context.bot, new_id)
-    
+
     elif data == 'my_groups':
         groups = user_data[uid].get('groups', [])
         if groups:
             await send_msg(uid, context.bot, "📁 " + "\n".join(groups), GROUPS_MENU)
         else:
             await send_msg(uid, context.bot, "📁 Нет групп", GROUPS_MENU)
-    
+
     elif data == 'settings':
         await send_msg(uid, context.bot, "⚙️ НАСТРОЙКИ", SETTINGS_MENU)
-    
+
     elif data == 'check_status':
         running = sum(1 for tk in active_tasks if tk.startswith(f"{uid}_"))
         await send_msg(uid, context.bot, f"📊 СТАТУС\n\n🟢 Работает: {running}\n🔐 Сессия: {'✅' if has_session_db(uid) else '❌'}", SETTINGS_MENU)
-    
+
     elif data == 'help_menu':
         await send_msg(uid, context.bot, "❓ ПОМОЩЬ", HELP_MENU)
-    
+
     elif data == 'help_quick':
         await send_msg(uid, context.bot, "🚀 1. Новая рассылка\n2. ТЕКСТ или ФОТО\n3. ГРУППЫ\n4. ЗАПУСТИТЬ\n5. Авторизация", HELP_MENU)
-    
+
     elif data == 'help_create':
         await send_msg(uid, context.bot, "📝 ТЕКСТ: отправь сообщение\n📷 ФОТО: отправь фото\n👥 ГРУППЫ: @group1, @group2\n⏱ ИНТЕРВАЛ: 5-300 сек", HELP_MENU)
-    
+
     elif data == 'help_errors':
-        await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал\n🤖 PR GRAM: обрабатывается автоматически", HELP_MENU)
-    
+        await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал\n🤖 Антиспам-бот: обрабатывается автоматически", HELP_MENU)
+
     elif data == 'clear_session':
         for tk in list(active_tasks.keys()):
             if tk.startswith(f"{uid}_"):
@@ -526,31 +552,31 @@ async def button_handler(update: Update, context):
             os.remove(session_file)
         delete_session_db(uid)
         await send_msg(uid, context.bot, "✅ Сессия очищена", SETTINGS_MENU)
-    
+
     elif data.startswith('select_'):
         bid = int(data.split('_')[1])
         await show_broadcast(uid, context.bot, bid)
-    
+
     elif data.startswith('text_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'text', 'bid': bid}
         await send_msg(uid, context.bot, "📝 Отправьте текст:", CANCEL_BTN)
-    
+
     elif data.startswith('photo_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'photo', 'bid': bid}
         await send_msg(uid, context.bot, "📷 Отправьте фото (подпись = текст):", CANCEL_BTN)
-    
+
     elif data.startswith('groups_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'groups', 'bid': bid}
         await send_msg(uid, context.bot, "👥 Группы через запятую:\n@group1, @group2", CANCEL_BTN)
-    
+
     elif data.startswith('interval_'):
         bid = int(data.split('_')[1])
         user_states[uid] = {'step': 'interval', 'bid': bid}
         await send_msg(uid, context.bot, "⏱ Интервал (5-300):", CANCEL_BTN)
-    
+
     elif data.startswith('start_'):
         bid = int(data.split('_')[1])
         bc = user_data[uid]['broadcasts'][bid]
@@ -573,7 +599,7 @@ async def button_handler(update: Update, context):
             return
         user_states[uid] = {'step': 'auth', 'bid': bid}
         await send_msg(uid, context.bot, "🔐 Номер телефона:\n+79123456789", CANCEL_BTN)
-    
+
     elif data.startswith('stop_'):
         bid = int(data.split('_')[1])
         tk = f"{uid}_{bid}"
@@ -584,7 +610,7 @@ async def button_handler(update: Update, context):
                 del active_tasks[tk]
             await send_msg(uid, context.bot, f"🛑 Рассылка #{bid+1} остановлена")
         await show_broadcast(uid, context.bot, bid)
-    
+
     elif data.startswith('clone_'):
         bid = int(data.split('_')[1])
         broadcasts = user_data[uid].get('broadcasts', [])
@@ -608,7 +634,7 @@ async def button_handler(update: Update, context):
             shutil.copy(old_media, new_media)
         save_data()
         await send_msg(uid, context.bot, "✅ Склонировано", MAIN_MENU)
-    
+
     elif data.startswith('delete_'):
         bid = int(data.split('_')[1])
         tk = f"{uid}_{bid}"
@@ -623,15 +649,15 @@ async def button_handler(update: Update, context):
         user_data[uid]['broadcasts'].pop(bid)
         save_data()
         await send_msg(uid, context.bot, "🗑 Удалено", MAIN_MENU)
-    
+
     elif data == 'add_group':
         user_states[uid] = {'step': 'add_group'}
         await send_msg(uid, context.bot, "➕ Ссылка на группу:\n@group_name", CANCEL_BTN)
-    
+
     elif data == 'list_groups':
         groups = user_data[uid].get('groups', [])
         await send_msg(uid, context.bot, "📋 " + "\n".join(groups) if groups else "📁 Нет групп", GROUPS_MENU)
-    
+
     elif data == 'remove_group':
         groups = user_data[uid].get('groups', [])
         if not groups:
@@ -640,7 +666,7 @@ async def button_handler(update: Update, context):
         kb = [[InlineKeyboardButton(f"❌ {g}", callback_data=f'del_{i}')] for i, g in enumerate(groups)]
         kb.append([InlineKeyboardButton("🔙 НАЗАД", callback_data='my_groups')])
         await context.bot.send_message(uid, "🗑 ВЫБЕРИТЕ ГРУППУ", reply_markup=InlineKeyboardMarkup(kb))
-    
+
     elif data.startswith('del_'):
         idx = int(data.split('_')[1])
         groups = user_data[uid].get('groups', [])
@@ -649,7 +675,7 @@ async def button_handler(update: Update, context):
             user_data[uid]['groups'] = groups
             save_data()
             await send_msg(uid, context.bot, f"✅ Удалена: {removed}", GROUPS_MENU)
-    
+
     elif data == 'cancel':
         if uid in user_states:
             del user_states[uid]
@@ -663,7 +689,7 @@ async def start_broadcast(uid, bot, bid, client):
     interval = bc.get('interval', 30)
     media_path = get_media_path(uid, bid)
     has_photo = os.path.exists(media_path)
-    
+
     valid = []
     for g in groups:
         try:
@@ -671,15 +697,15 @@ async def start_broadcast(uid, bot, bid, client):
             valid.append(g)
         except:
             await send_msg(uid, bot, f"⚠️ {g} - недоступна")
-    
+
     if not valid:
         await send_msg(uid, bot, "❌ Нет доступных групп")
         return
-    
+
     bc['groups'] = valid
     save_data()
     await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Автоподписка включена! Бот подпишется автоматически")
-    
+
     tk = f"{uid}_{bid}"
     task = asyncio.create_task(run_broadcast(uid, bid, client, valid, text, interval, media_path, has_photo, bot))
     active_tasks[tk] = task
@@ -712,14 +738,14 @@ async def run_broadcast(uid, bid, client, groups, text, interval, media_path, ha
 async def message_handler(update: Update, context):
     uid = update.effective_user.id
     save_user(uid)
-    
+
     step_data = user_states.get(uid, {})
     step = step_data.get('step')
-    
+
     if not step:
         await main_menu(uid, context.bot)
         return
-    
+
     if step == 'add_group':
         if not update.message.text:
             return
@@ -734,7 +760,7 @@ async def message_handler(update: Update, context):
             save_data()
             await send_msg(uid, context.bot, f"✅ {g} добавлена", GROUPS_MENU)
         del user_states[uid]
-    
+
     elif step == 'text':
         if not update.message.text:
             return
@@ -748,7 +774,7 @@ async def message_handler(update: Update, context):
         await send_msg(uid, context.bot, "✅ Текст сохранён")
         del user_states[uid]
         await show_broadcast(uid, context.bot, bid)
-    
+
     elif step == 'photo':
         bid = step_data['bid']
         if update.message.photo:
@@ -765,7 +791,7 @@ async def message_handler(update: Update, context):
             return
         del user_states[uid]
         await show_broadcast(uid, context.bot, bid)
-    
+
     elif step == 'groups':
         if not update.message.text:
             return
@@ -786,7 +812,7 @@ async def message_handler(update: Update, context):
             return
         del user_states[uid]
         await show_broadcast(uid, context.bot, bid)
-    
+
     elif step == 'interval':
         if not update.message.text:
             return
@@ -805,7 +831,7 @@ async def message_handler(update: Update, context):
             return
         del user_states[uid]
         await show_broadcast(uid, context.bot, bid)
-    
+
     elif step == 'auth':
         if not update.message.text:
             return
@@ -814,12 +840,12 @@ async def message_handler(update: Update, context):
         if not phone.startswith('+'):
             await send_msg(uid, context.bot, "❌ Формат: +79123456789", CANCEL_BTN)
             return
-        
+
         user_states[uid] = {'step': 'code', 'bid': bid, 'phone': phone}
         session_file = get_session_path(uid)
         client = TelegramClient(session_file, API_ID, API_HASH)
         sessions[uid] = client
-        
+
         try:
             await client.connect()
             await client.send_code_request(phone)
@@ -827,7 +853,7 @@ async def message_handler(update: Update, context):
         except Exception as e:
             await send_msg(uid, context.bot, f"❌ {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
-    
+
     elif step == 'code':
         if not update.message.text:
             return
@@ -842,7 +868,7 @@ async def message_handler(update: Update, context):
         user_states[uid]['code'] = code
         user_states[uid]['step'] = '2fa'
         await send_msg(uid, context.bot, "🔐 Пароль 2FA (если есть) или /skip", CANCEL_BTN)
-    
+
     elif step == '2fa':
         if not update.message.text:
             return
@@ -852,11 +878,11 @@ async def message_handler(update: Update, context):
             await send_msg(uid, context.bot, "❌ Ошибка сессии", MAIN_MENU)
             del user_states[uid]
             return
-        
+
         bid = user_states[uid]['bid']
         phone = user_states[uid]['phone']
         code = user_states[uid]['code']
-        
+
         try:
             await client.sign_in(phone, code=code)
         except SessionPasswordNeededError:
@@ -876,7 +902,7 @@ async def message_handler(update: Update, context):
             await send_msg(uid, context.bot, f"❌ {str(e)[:100]}", MAIN_MENU)
             del user_states[uid]
             return
-        
+
         save_session_db(uid, phone)
         await start_broadcast(uid, context.bot, bid, client)
         del user_states[uid]
@@ -909,26 +935,26 @@ async def start_server():
 async def run():
     global bot_app
     load_data()
-    
+
     bot_app = Application.builder().token(BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("skip", skip))
     bot_app.add_handler(CallbackQueryHandler(button_handler))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     bot_app.add_handler(MessageHandler(filters.PHOTO, message_handler))
-    
+
     await bot_app.initialize()
     await bot_app.start()
-    
+
     await bot_app.bot.set_webhook(f"{RENDER_URL}/webhook/{BOT_TOKEN}")
-    
+
     print("=" * 60)
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
     print("🤖 АВТОПОДПИСКА АКТИВНА")
-    print("📌 ОБРАБОТКА PR GRAM")
+    print("📌 ОБРАБОТКА АНТИСПАМ-БОТОВ")
     print("📌 ПОДПИСЫВАЕТСЯ ЧЕРЕЗ JOINCHANNELREQUEST")
     print("=" * 60)
-    
+
     await start_server()
 
 def main():
