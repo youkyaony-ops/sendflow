@@ -9,21 +9,21 @@ import sqlite3
 import threading
 import logging
 from datetime import datetime
-from telethon import TelegramClient, errors
-from telethon.errors import (
-    SessionPasswordNeededError,
-    PhoneCodeInvalidError,
-    FloodWaitError,
-    AuthKeyError,
+from pyrogram import Client, filters
+from pyrogram.errors import (
+    FloodWait,
+    InviteRequestSent,
+    UserAlreadyParticipant,
+    ChannelPrivate,
+    ChatWriteForbidden,
+    UserBanned,
     RPCError,
-    ChatWriteForbiddenError,
-    ChannelPrivateError,
-    UserBannedInChannelError,
-    UserAlreadyParticipantError,
-    InviteRequestSentError
+    PhoneNumberInvalid,
+    PhoneCodeInvalid,
+    PhoneCodeExpired,
+    SessionPasswordNeeded
 )
-from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.messages import ImportChatInviteRequest
+from pyrogram.types import InlineKeyboardButton as PyroInlineButton, InlineKeyboardMarkup as PyroInlineMarkup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from aiohttp import web
@@ -44,10 +44,10 @@ RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://sendflow-12.onrender
 
 user_data = {}
 active_tasks = {}
-sessions = {}
+pyro_clients = {}
 user_states = {}
 
-# ==================== SQLite С БЛОКИРОВКОЙ ====================
+# ==================== SQLite ====================
 db_lock = threading.Lock()
 
 def get_db_connection():
@@ -64,7 +64,8 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             phone TEXT,
             created_at TIMESTAMP,
-            last_ping TIMESTAMP
+            last_ping TIMESTAMP,
+            session_string TEXT
         )
     ''')
     conn.commit()
@@ -73,16 +74,16 @@ def init_db():
 
 init_db()
 
-def save_session_db(user_id, phone):
+def save_session_db(user_id, phone, session_string):
     with db_lock:
         conn = None
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT OR REPLACE INTO sessions (user_id, phone, created_at, last_ping)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, phone, datetime.now(), datetime.now()))
+                INSERT OR REPLACE INTO sessions (user_id, phone, created_at, last_ping, session_string)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user_id, phone, datetime.now(), datetime.now(), session_string))
             conn.commit()
         except Exception as e:
             print(f"Save session error: {e}")
@@ -134,6 +135,22 @@ def has_session_db(user_id):
             if conn:
                 conn.close()
 
+def get_session_string(user_id):
+    with db_lock:
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT session_string FROM sessions WHERE user_id = ?', (user_id,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+        except Exception as e:
+            print(f"Get session string error: {e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+
 # ==================== ДАННЫЕ ====================
 def save_data():
     try:
@@ -179,49 +196,103 @@ def save_user(uid):
 def get_media_path(uid, bid):
     return os.path.join(MEDIA_DIR, f'{uid}_{bid}.jpg')
 
-def get_session_path(uid):
-    return os.path.join(SESSIONS_DIR, f'session_{uid}.session')
-
-# ==================== КЛИЕНТ ====================
-async def get_client(uid):
-    if uid in sessions:
+# ==================== PYROGRAM КЛИЕНТ ====================
+async def get_pyro_client(uid):
+    if uid in pyro_clients:
         try:
-            await sessions[uid].get_me()
+            await pyro_clients[uid].get_me()
             update_ping_db(uid)
-            return sessions[uid]
-        except (AuthKeyError, ConnectionError, RPCError):
+            return pyro_clients[uid]
+        except Exception:
             try:
-                await sessions[uid].disconnect()
+                await pyro_clients[uid].stop()
             except:
                 pass
-            del sessions[uid]
-        except:
-            pass
+            del pyro_clients[uid]
 
-    session_file = get_session_path(uid)
-    client = TelegramClient(session_file, API_ID, API_HASH)
-
-    try:
-        await client.connect()
-        if await client.is_user_authorized():
-            sessions[uid] = client
+    session_string = get_session_string(uid)
+    if session_string:
+        client = Client(
+            name=f"user_{uid}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=session_string,
+            workdir=SESSIONS_DIR
+        )
+        try:
+            await client.start()
+            pyro_clients[uid] = client
             update_ping_db(uid)
             return client
-    except:
-        pass
+        except Exception as e:
+            print(f"Pyro client start error: {e}")
+            try:
+                await client.stop()
+            except:
+                pass
+            return None
     return None
+
+async def request_pyro_code(uid, phone):
+    """Отправляет код подтверждения на номер"""
+    client = Client(f"user_{uid}", API_ID, API_HASH, workdir=SESSIONS_DIR)
+    try:
+        await client.start()
+        await client.send_code(phone)
+        pyro_clients[uid] = client
+        return True
+    except Exception as e:
+        print(f"Code request error: {e}")
+        try:
+            await client.stop()
+        except:
+            pass
+        return False
+
+async def sign_in_pyro(uid, code):
+    """Завершает авторизацию по коду"""
+    client = pyro_clients.get(uid)
+    if not client:
+        return None
+    try:
+        await client.sign_in(code=code)
+        session_string = await client.export_session_string()
+        phone = client.phone_number
+        save_session_db(uid, phone, session_string)
+        return client
+    except SessionPasswordNeeded:
+        # Если требуется 2FA пароль
+        return "2fa_needed"
+    except Exception as e:
+        print(f"Sign in error: {e}")
+        return None
+
+async def sign_in_2fa(uid, password):
+    """Вход с 2FA паролем"""
+    client = pyro_clients.get(uid)
+    if not client:
+        return None
+    try:
+        await client.sign_in(password=password)
+        session_string = await client.export_session_string()
+        phone = client.phone_number
+        save_session_db(uid, phone, session_string)
+        return client
+    except Exception as e:
+        print(f"2FA error: {e}")
+        return None
 
 async def keep_alive_loop(uid):
     while True:
         await asyncio.sleep(300)
-        if uid in sessions:
+        if uid in pyro_clients:
             try:
-                await sessions[uid].get_me()
+                await pyro_clients[uid].get_me()
                 update_ping_db(uid)
             except:
                 pass
 
-# ==================== АВТОПОДПИСКА (ВНЕДРЁННАЯ ИЗ КОДА ЗНАКОМОГО) ====================
+# ==================== АВТОПОДПИСКА (РАБОЧАЯ ВЕРСИЯ С PYROGRAM) ====================
 
 _join_cd = {}
 _join_cd_sec = 300
@@ -242,27 +313,22 @@ def _gc():
         if _proactive_cache[k] < now - 43200:
             del _proactive_cache[k]
 
-async def join_channel(client, target: str, tag: str = "") -> int:
+async def join_channel(client: Client, target: str, tag: str = "") -> int | None:
     _gc()
     key = (tag, target.lower())
     if time.time() - _join_cd.get(key, 0) < _join_cd_sec:
         return None
     try:
-        # Telethon версия join_channel
-        if target.startswith('@'):
-            entity = await client.get_entity(target)
-        else:
-            entity = await client.get_entity(target)
-        r = await client(JoinChannelRequest(entity))
-        if r and hasattr(r, 'chats') and r.chats:
+        r = await client.join_chat(target)
+        if r and hasattr(r, "id"):
             _join_cd[key] = time.time()
             try:
-                await client.archive_chats(r.chats[0].id)
-            except:
+                await client.archive_chats(r.id)
+            except Exception:
                 pass
-            return r.chats[0].id
-    except FloodWaitError as e:
-        _join_cd[key] = time.time() + max(e.seconds, _join_cd_sec)
+            return r.id
+    except FloodWait as e:
+        _join_cd[key] = time.time() + max(int(e.value), _join_cd_sec)
     except Exception as e:
         s = str(e)
         _join_cd[key] = time.time()
@@ -273,14 +339,14 @@ async def join_channel(client, target: str, tag: str = "") -> int:
         print(f"[JOIN] join failed {target}: {e}")
     return None
 
-async def click_verify(client, chat_id: int, limit: int = 10) -> bool:
+async def click_verify(client: Client, chat_id: int, limit: int = 10) -> bool:
     for _ in range(2):
         try:
-            async for msg in client.iter_messages(chat_id, limit=limit):
+            async for msg in client.get_chat_history(chat_id, limit=limit):
                 if not msg.reply_markup:
                     continue
-                for row in msg.reply_markup.rows:
-                    for btn in row.buttons:
+                for row in msg.reply_markup.inline_keyboard:
+                    for btn in row:
                         t = (btn.text or "").lower()
                         if any(k in t for k in ["провер", "verify", "captcha", "готов", "я подписался", "вступил", "подтверд"]):
                             await msg.click(btn.text)
@@ -297,52 +363,47 @@ def _grab_links(msg) -> list:
     lower = text.lower()
     
     if msg.reply_markup:
-        for row in msg.reply_markup.rows:
-            for btn in row.buttons:
-                if hasattr(btn, 'url') and btn.url and "t.me/" in btn.url:
+        for row in msg.reply_markup.inline_keyboard:
+            for btn in row:
+                if btn.url and "t.me/" in btn.url:
                     links.append(btn.url)
     
-    # Ищем @username
+    # @username
     at_matches = re.findall(r'@([a-zA-Z0-9_]{5,32})', text)
     for match in at_matches:
         if not match.lower().endswith('bot'):
             links.append(f'@{match}')
     
-    # Ищем t.me/username
+    # t.me/username
     tm_matches = re.findall(r't\.me/([a-zA-Z0-9_]{5,32})', text)
     for match in tm_matches:
         links.append(f'https://t.me/{match}')
     
-    # Ищем joinchat ссылки
+    # joinchat ссылки
     jc_matches = re.findall(r't\.me/joinchat/([a-zA-Z0-9_-]+)', text)
     for match in jc_matches:
         links.append(f'https://t.me/joinchat/{match}')
     
     return list(dict.fromkeys(links))
 
-async def auto_subscribe_simple(client, group_entity, bot, uid) -> bool:
+async def auto_subscribe_pyro(client: Client, chat_id: int, bot, uid: int) -> bool:
     """
-    Автоподписка на основе кода знакомого
+    Автоподписка через Pyrogram - точная копия работающего кода
     """
     try:
-        chat_id = group_entity.id
         await bot.send_message(uid, "🔍 Ищу сообщения с требованием подписки...")
         
         targets = []
-        joined = False
         
-        # 1. Проверяем последние 30 сообщений
-        try:
-            async for msg in client.iter_messages(chat_id, limit=30):
-                if not msg.text:
-                    continue
-                tl = msg.text.lower()
-                if not any(p in tl for p in ["подписаться", "вступить", "subscribe", "join", "капча", "captcha", "verification", "доступ запрещён", "restricted"]):
-                    continue
-                targets.extend(_grab_links(msg))
-                await bot.send_message(uid, f"📝 Найдено сообщение: {msg.text[:100]}...")
-        except Exception as e:
-            print(f"Error reading messages: {e}")
+        # 1. Читаем последние 30 сообщений
+        async for msg in client.get_chat_history(chat_id, limit=30):
+            if not msg.text:
+                continue
+            tl = msg.text.lower()
+            if not any(p in tl for p in ["подписаться", "вступить", "subscribe", "join", "капча", "captcha", "verification", "доступ запрещён", "restricted"]):
+                continue
+            targets.extend(_grab_links(msg))
+            await bot.send_message(uid, f"📝 Найдено сообщение: {msg.text[:100]}...")
         
         if not targets:
             await bot.send_message(uid, "⚠️ Не найдено ссылок для подписки")
@@ -360,7 +421,15 @@ async def auto_subscribe_simple(client, group_entity, bot, uid) -> bool:
             if raw.startswith("https://t.me/") or raw.startswith("http://t.me/"):
                 path = raw.split("t.me/")[-1].strip("/")
                 if path.startswith("+") or path.startswith("joinchat/"):
-                    pass
+                    try:
+                        await client.join_chat(raw)
+                        subscribed += 1
+                        await bot.send_message(uid, f"✅ Вступил по ссылке")
+                        await asyncio.sleep(2)
+                        continue
+                    except Exception as e:
+                        await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
+                        continue
                 else:
                     raw = "@" + path.split("?")[0]
                     if raw.lower().endswith("bot"):
@@ -369,28 +438,17 @@ async def auto_subscribe_simple(client, group_entity, bot, uid) -> bool:
                 raw = '@' + raw
             
             try:
-                # Пробуем подписаться
-                if raw.startswith('https://t.me/joinchat/') or raw.startswith('t.me/joinchat/'):
-                    hash_part = raw.split('/')[-1]
-                    try:
-                        await client(ImportChatInviteRequest(hash_part))
-                        subscribed += 1
-                        await bot.send_message(uid, f"✅ Вступил по ссылке")
-                        await asyncio.sleep(2)
-                    except Exception as e:
-                        await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
+                r = await join_channel(client, raw, str(uid))
+                if r is not None:
+                    subscribed += 1
+                    await bot.send_message(uid, f"✅ Подписался на {raw}")
+                    await asyncio.sleep(2)
                 else:
-                    result = await join_channel(client, raw, str(uid))
-                    if result is not None:
-                        subscribed += 1
-                        await bot.send_message(uid, f"✅ Подписался на {raw}")
-                        await asyncio.sleep(2)
-                    else:
-                        await bot.send_message(uid, f"⚠️ Не удалось подписаться на {raw}")
+                    await bot.send_message(uid, f"⚠️ Не удалось подписаться на {raw}")
             except Exception as e:
                 await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
         
-        # 3. Проверяем кнопки
+        # 3. Проверяем кнопки подтверждения
         await bot.send_message(uid, "🔘 Проверяю кнопки подтверждения...")
         verified = await click_verify(client, chat_id)
         if verified:
@@ -409,26 +467,25 @@ async def auto_subscribe_simple(client, group_entity, bot, uid) -> bool:
 
 # ==================== ОТПРАВКА С АВТОПОДПИСКОЙ ====================
 
-async def send_with_auto_join(uid, bid, client, group, text, bot):
+async def send_with_auto_join(uid, bid, client: Client, chat_id, text, bot):
     """
-    Отправляет сообщение, при ошибке запускает автоподписку
+    Отправляет сообщение через Pyrogram, при ошибке запускает автоподписку
     """
     try:
-        await client.send_message(group, text)
+        await client.send_message(chat_id, text)
         return True, "OK"
-    except FloodWaitError as e:
-        await asyncio.sleep(e.seconds)
-        return await send_with_auto_join(uid, bid, client, group, text, bot)
-    except (ChatWriteForbiddenError, ChannelPrivateError, UserBannedInChannelError) as e:
-        await bot.send_message(uid, f"⚠️ Требуется подписка для {group}")
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        return await send_with_auto_join(uid, bid, client, chat_id, text, bot)
+    except (ChatWriteForbidden, ChannelPrivate, UserBanned) as e:
+        await bot.send_message(uid, f"⚠️ Требуется подписка для {chat_id}")
         try:
-            group_entity = await client.get_entity(group)
-            success = await auto_subscribe_simple(client, group_entity, bot, uid)
+            success = await auto_subscribe_pyro(client, chat_id, bot, uid)
             if success:
                 await bot.send_message(uid, f"🔄 Повторная попытка через 3 секунды...")
                 await asyncio.sleep(3)
                 try:
-                    await client.send_message(group, text)
+                    await client.send_message(chat_id, text)
                     return True, "OK после подписки"
                 except Exception as send_err:
                     return False, f"Не отправилось: {str(send_err)[:50]}"
@@ -573,7 +630,7 @@ async def button_handler(update: Update, context):
         await send_msg(uid, context.bot, "📝 ТЕКСТ: отправь сообщение\n📷 ФОТО: отправь фото\n👥 ГРУППЫ: @group1, @group2\n⏱ ИНТЕРВАЛ: 5-300 сек", HELP_MENU)
 
     elif data == 'help_errors':
-        await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал\n🤖 Автоподписка: встроена из рабочего кода", HELP_MENU)
+        await send_msg(uid, context.bot, "🔧 2FA: пароль или /skip\n❌ Группа недоступна: добавь бота\n⚠️ Флуд: увеличь интервал\n🤖 Автоподписка: встроена на Pyrogram", HELP_MENU)
 
     elif data == 'clear_session':
         for tk in list(active_tasks.keys()):
@@ -585,15 +642,12 @@ async def button_handler(update: Update, context):
                 await asyncio.sleep(0.3)
                 if tk in active_tasks:
                     del active_tasks[tk]
-        if uid in sessions:
+        if uid in pyro_clients:
             try:
-                await sessions[uid].disconnect()
+                await pyro_clients[uid].stop()
             except:
                 pass
-            del sessions[uid]
-        session_file = get_session_path(uid)
-        if os.path.exists(session_file):
-            os.remove(session_file)
+            del pyro_clients[uid]
         delete_session_db(uid)
         await send_msg(uid, context.bot, "✅ Сессия очищена", SETTINGS_MENU)
 
@@ -637,12 +691,13 @@ async def button_handler(update: Update, context):
             await send_msg(uid, context.bot, "⚠️ Уже запущена")
             await show_broadcast(uid, context.bot, bid)
             return
-        client = await get_client(uid)
+        client = await get_pyro_client(uid)
         if client:
             await start_broadcast(uid, context.bot, bid, client)
             return
-        user_states[uid] = {'step': 'auth', 'bid': bid}
-        await send_msg(uid, context.bot, "🔐 Номер телефона:\n+79123456789", CANCEL_BTN)
+        # Если нет сессии - запрашиваем номер
+        user_states[uid] = {'step': 'auth_phone', 'bid': bid}
+        await send_msg(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789", CANCEL_BTN)
 
     elif data.startswith('stop_'):
         bid = int(data.split('_')[1])
@@ -726,7 +781,7 @@ async def button_handler(update: Update, context):
         await main_menu(uid, context.bot, "❌ Отменено")
 
 # ==================== ЗАПУСК РАССЫЛКИ ====================
-async def start_broadcast(uid, bot, bid, client):
+async def start_broadcast(uid, bot, bid, client: Client):
     bc = user_data[uid]['broadcasts'][bid]
     groups = bc.get('groups', [])
     text = bc.get('text', '')
@@ -737,7 +792,7 @@ async def start_broadcast(uid, bot, bid, client):
     valid = []
     for g in groups:
         try:
-            await client.get_entity(g)
+            await client.get_chat(g)
             valid.append(g)
         except:
             await send_msg(uid, bot, f"⚠️ {g} - недоступна")
@@ -755,14 +810,14 @@ async def start_broadcast(uid, bot, bid, client):
     active_tasks[tk] = task
     asyncio.create_task(keep_alive_loop(uid))
 
-async def run_broadcast(uid, bid, client, groups, text, interval, media_path, has_photo, bot):
+async def run_broadcast(uid, bid, client: Client, groups, text, interval, media_path, has_photo, bot):
     sent = user_data[uid]['broadcasts'][bid].get('sent', 0)
     try:
         while True:
             for group in groups:
                 try:
                     if has_photo and os.path.exists(media_path):
-                        await client.send_file(group, media_path, caption=text)
+                        await client.send_photo(group, media_path, caption=text)
                     else:
                         success, _ = await send_with_auto_join(uid, bid, client, group, text, bot)
                         if not success:
@@ -770,8 +825,8 @@ async def run_broadcast(uid, bid, client, groups, text, interval, media_path, ha
                     sent += 1
                     user_data[uid]['broadcasts'][bid]['sent'] = sent
                     save_data()
-                except FloodWaitError as e:
-                    await asyncio.sleep(min(e.seconds, 60))
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
                 except Exception as e:
                     print(f"[BROADCAST] Ошибка: {e}")
                 await asyncio.sleep(interval)
@@ -876,80 +931,63 @@ async def message_handler(update: Update, context):
         del user_states[uid]
         await show_broadcast(uid, context.bot, bid)
 
-    elif step == 'auth':
+    elif step == 'auth_phone':
         if not update.message.text:
             return
-        bid = step_data['bid']
         phone = update.message.text.strip()
         if not phone.startswith('+'):
             await send_msg(uid, context.bot, "❌ Формат: +79123456789", CANCEL_BTN)
             return
-
-        user_states[uid] = {'step': 'code', 'bid': bid, 'phone': phone}
-        session_file = get_session_path(uid)
-        client = TelegramClient(session_file, API_ID, API_HASH)
-        sessions[uid] = client
-
-        try:
-            await client.connect()
-            await client.send_code_request(phone)
-            await send_msg(uid, context.bot, "📲 Введите код:\ncode12345", CANCEL_BTN)
-        except Exception as e:
-            await send_msg(uid, context.bot, f"❌ {str(e)[:100]}", MAIN_MENU)
+        bid = step_data['bid']
+        success = await request_pyro_code(uid, phone)
+        if success:
+            user_states[uid] = {'step': 'auth_code', 'bid': bid}
+            await send_msg(uid, context.bot, "📲 Код отправлен. Введите code12345", CANCEL_BTN)
+        else:
+            await send_msg(uid, context.bot, "❌ Ошибка отправки кода", MAIN_MENU)
             del user_states[uid]
 
-    elif step == 'code':
+    elif step == 'auth_code':
         if not update.message.text:
             return
         text = update.message.text.strip().lower()
         if not text.startswith('code'):
-            await send_msg(uid, context.bot, "❌ НЕВЕРНЫЙ ФОРМАТ!\n\nВведите код строго в формате:\ncode12345\n(где 12345 - цифры из Telegram)", CANCEL_BTN)
+            await send_msg(uid, context.bot, "❌ Формат: code12345", CANCEL_BTN)
             return
         code = text[4:]
         if not code.isdigit():
-            await send_msg(uid, context.bot, "❌ После 'code' должны быть только цифры!\nПример: code12345", CANCEL_BTN)
+            await send_msg(uid, context.bot, "❌ Только цифры после code", CANCEL_BTN)
             return
-        user_states[uid]['code'] = code
-        user_states[uid]['step'] = '2fa'
-        await send_msg(uid, context.bot, "🔐 Пароль 2FA (если есть) или /skip", CANCEL_BTN)
 
-    elif step == '2fa':
+        result = await sign_in_pyro(uid, code)
+        if result == "2fa_needed":
+            user_states[uid] = {'step': 'waiting_2fa', 'bid': user_states[uid]['bid']}
+            await send_msg(uid, context.bot, "🔐 Введите пароль 2FA:", CANCEL_BTN)
+            return
+        elif result:
+            bid = user_states[uid]['bid']
+            await start_broadcast(uid, context.bot, bid, result)
+            del user_states[uid]
+        else:
+            await send_msg(uid, context.bot, "❌ Неверный код или ошибка", MAIN_MENU)
+            del user_states[uid]
+
+    elif step == 'waiting_2fa':
         if not update.message.text:
             return
-        password = None if update.message.text.strip() == '/skip' else update.message.text.strip()
-        client = sessions.get(uid)
+        password = update.message.text.strip()
+        client = pyro_clients.get(uid)
         if not client:
             await send_msg(uid, context.bot, "❌ Ошибка сессии", MAIN_MENU)
             del user_states[uid]
             return
-
-        bid = user_states[uid]['bid']
-        phone = user_states[uid]['phone']
-        code = user_states[uid]['code']
-
-        try:
-            await client.sign_in(phone, code=code)
-        except SessionPasswordNeededError:
-            if not password:
-                await send_msg(uid, context.bot, "🔐 Введите пароль 2FA:", CANCEL_BTN)
-                return
-            try:
-                await client.sign_in(password=password)
-            except:
-                await send_msg(uid, context.bot, "❌ Неверный пароль", CANCEL_BTN)
-                return
-        except PhoneCodeInvalidError:
-            await send_msg(uid, context.bot, "❌ НЕВЕРНЫЙ КОД!\nНачните авторизацию заново.", MAIN_MENU)
+        result = await sign_in_2fa(uid, password)
+        if result:
+            bid = user_states[uid]['bid']
+            await start_broadcast(uid, context.bot, bid, result)
             del user_states[uid]
-            return
-        except Exception as e:
-            await send_msg(uid, context.bot, f"❌ {str(e)[:100]}", MAIN_MENU)
-            del user_states[uid]
-            return
-
-        save_session_db(uid, phone)
-        await start_broadcast(uid, context.bot, bid, client)
-        del user_states[uid]
+        else:
+            await send_msg(uid, context.bot, "❌ Неверный пароль 2FA", CANCEL_BTN)
 
 # ==================== HTTP СЕРВЕР ====================
 async def health(request):
@@ -993,10 +1031,9 @@ async def run():
     await bot_app.bot.set_webhook(f"{RENDER_URL}/webhook/{BOT_TOKEN}")
 
     print("=" * 60)
-    print("✅ SENDFLOW БОТ ЗАПУЩЕН")
-    print("🤖 АВТОПОДПИСКА ВНЕДРЕНА")
-    print("📌 ИСПОЛЬЗУЕТ РАБОЧИЙ АЛГОРИТМ")
-    print("📌 SQLite С WAL РЕЖИМОМ")
+    print("✅ SENDFLOW БОТ ЗАПУЩЕН (PYROGRAM)")
+    print("🤖 АВТОПОДПИСКА ВНЕДРЕНА ИЗ РАБОЧЕГО КОДА")
+    print("📌 ИСПОЛЬЗУЕТ PYROGRAM (КАК У ЗНАКОМОГО)")
     print("=" * 60)
 
     await start_server()
