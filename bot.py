@@ -38,13 +38,28 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = '8135472813:AAHiugVNCzgRuIAxG4L_3MppCW0Is01VHH8'
 API_ID = 31245848
 API_HASH = '67336528977585e1457985dc1d0ceefb'
-ADMIN_ID = 7192049112  # Твой ID из алерта
+ADMIN_ID = 7192049112
 DATA_FILE = 'user_data.json'
 SESSIONS_DIR = 'telegram_sessions'
 MEDIA_DIR = 'media_files'
 MAX_GROUPS_PER_BROADCAST = 50
 MAX_TOTAL_GROUPS = 100
 MAX_BROADCASTS = 20
+
+# ==================== НАСТРОЙКА ПРОКСИ ====================
+# Если USE_PROXY = True, бот будет подключаться к Telegram через SOCKS5 прокси
+# Это нужно для обхода блокировок на бесплатном Render
+USE_PROXY = True  # Поставь False, если не нужен прокси
+
+# Бесплатные прокси (может потребоваться замена, если перестанут работать)
+PROXY = {
+    "scheme": "socks5",
+    "hostname": "51.75.144.245",
+    "port": 1080,
+    # Если прокси требует авторизацию, раскомментируй:
+    # "username": "your_username",
+    # "password": "your_password"
+}
 
 for folder in [SESSIONS_DIR, MEDIA_DIR]:
     os.makedirs(folder, exist_ok=True)
@@ -217,7 +232,7 @@ async def alert_admin(bot, text: str):
     except Exception as e:
         logger.error(f"Alert admin failed: {e}")
 
-# ==================== PYROGRAM КЛИЕНТ ====================
+# ==================== PYROGRAM КЛИЕНТ С ПРОКСИ ====================
 async def get_pyro_client(uid):
     if uid in pyro_clients:
         try:
@@ -238,12 +253,14 @@ async def get_pyro_client(uid):
             api_id=API_ID,
             api_hash=API_HASH,
             session_string=session_string,
-            workdir=SESSIONS_DIR
+            workdir=SESSIONS_DIR,
+            proxy=PROXY if USE_PROXY else None
         )
         try:
             await client.start()
             pyro_clients[uid] = client
             update_ping_db(uid)
+            logger.info(f"✅ Клиент {uid} подключен {'через прокси' if USE_PROXY else 'напрямую'}")
             return client
         except Exception as e:
             logger.error(f"Pyro client start error for {uid}: {e}")
@@ -255,18 +272,25 @@ async def get_pyro_client(uid):
     return None
 
 async def request_pyro_code(uid, phone, bot=None):
-    """Запрос кода авторизации с детальной ошибкой"""
-    client = Client(f"user_{uid}", API_ID, API_HASH, workdir=SESSIONS_DIR)
+    """Запрос кода авторизации с детальной ошибкой (с поддержкой прокси)"""
+    client = Client(
+        f"user_{uid}", 
+        API_ID, 
+        API_HASH, 
+        workdir=SESSIONS_DIR,
+        proxy=PROXY if USE_PROXY else None
+    )
     try:
         await client.start()
         await client.send_code(phone)
         pyro_clients[uid] = client
+        logger.info(f"✅ Код отправлен для {uid} {'через прокси' if USE_PROXY else 'напрямую'}")
         return True, None
     except Exception as e:
         error_msg = str(e)[:200]
         logger.error(f"Code request error for {uid}: {error_msg}")
         if bot:
-            await alert_admin(bot, f"❌ Ошибка отправки кода для {uid}\nТелефон: {phone}\nОшибка: {error_msg}")
+            await alert_admin(bot, f"❌ Ошибка отправки кода для {uid}\nТелефон: {phone}\nПрокси: {'включен' if USE_PROXY else 'выключен'}\nОшибка: {error_msg}")
         try:
             await client.stop()
         except:
@@ -920,7 +944,7 @@ async def start_broadcast(uid, bot, bid, client: Client):
     if uid not in keep_alive_tasks or keep_alive_tasks[uid].done():
         keep_alive_tasks[uid] = asyncio.create_task(keep_alive_loop(uid))
     
-    await alert_admin(bot, f"🚀 Пользователь {uid} запустил рассылку #{bid+1}\nГрупп: {len(valid)}\nИнтервал: {interval}с")
+    await alert_admin(bot, f"🚀 Пользователь {uid} запустил рассылку #{bid+1}\nГрупп: {len(valid)}\nИнтервал: {interval}с\nПрокси: {'✅' if USE_PROXY else '❌'}")
 
 async def run_broadcast(uid, bid, client: Client, groups, text, interval, media_path, has_photo, bot):
     sent = user_data[uid]['broadcasts'][bid].get('sent', 0)
@@ -1180,8 +1204,10 @@ async def run():
 
     await bot_app.bot.set_webhook(f"{RENDER_URL}/webhook/{BOT_TOKEN}")
 
+    proxy_status = "✅ ВКЛЮЧЕН" if USE_PROXY else "❌ ВЫКЛЮЧЕН"
     print("=" * 60)
-    print("✅ SENDFLOW БОТ ЗАПУЩЕН (v2.1)")
+    print("✅ SENDFLOW БОТ ЗАПУЩЕН (v2.2)")
+    print(f"🌐 ПРОКСИ: {proxy_status}")
     print("🤖 АВТОПОДПИСКА УЛУЧШЕНА")
     print("📊 СТАТИСТИКА И АЛЕРТЫ ДОБАВЛЕНЫ")
     print("🔒 ЛИМИТЫ ГРУПП И УТЕЧКИ ИСПРАВЛЕНЫ")
@@ -1190,7 +1216,7 @@ async def run():
     print("=" * 60)
     
     try:
-        await bot_app.bot.send_message(ADMIN_ID, "✅ SendFlow бот запущен (v2.1)")
+        await bot_app.bot.send_message(ADMIN_ID, f"✅ SendFlow бот запущен (v2.2)\nПрокси: {proxy_status}")
     except:
         pass
 
