@@ -7,7 +7,6 @@ import random
 import shutil
 import sqlite3
 import threading
-import logging
 from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.errors import (
@@ -234,7 +233,6 @@ async def get_pyro_client(uid):
     return None
 
 async def request_pyro_code(uid, phone):
-    """Отправляет код подтверждения на номер"""
     client = Client(f"user_{uid}", API_ID, API_HASH, workdir=SESSIONS_DIR)
     try:
         await client.start()
@@ -250,7 +248,6 @@ async def request_pyro_code(uid, phone):
         return False
 
 async def sign_in_pyro(uid, code):
-    """Завершает авторизацию по коду"""
     client = pyro_clients.get(uid)
     if not client:
         return None
@@ -261,14 +258,12 @@ async def sign_in_pyro(uid, code):
         save_session_db(uid, phone, session_string)
         return client
     except SessionPasswordNeeded:
-        # Если требуется 2FA пароль
         return "2fa_needed"
     except Exception as e:
         print(f"Sign in error: {e}")
         return None
 
 async def sign_in_2fa(uid, password):
-    """Вход с 2FA паролем"""
     client = pyro_clients.get(uid)
     if not client:
         return None
@@ -292,7 +287,7 @@ async def keep_alive_loop(uid):
             except:
                 pass
 
-# ==================== АВТОПОДПИСКА (РАБОЧАЯ ВЕРСИЯ С PYROGRAM) ====================
+# ==================== АВТОПОДПИСКА (РАБОЧАЯ ВЕРСИЯ) ====================
 
 _join_cd = {}
 _join_cd_sec = 300
@@ -360,7 +355,6 @@ async def click_verify(client: Client, chat_id: int, limit: int = 10) -> bool:
 def _grab_links(msg) -> list:
     links = []
     text = msg.text or ""
-    lower = text.lower()
     
     if msg.reply_markup:
         for row in msg.reply_markup.inline_keyboard:
@@ -368,18 +362,15 @@ def _grab_links(msg) -> list:
                 if btn.url and "t.me/" in btn.url:
                     links.append(btn.url)
     
-    # @username
     at_matches = re.findall(r'@([a-zA-Z0-9_]{5,32})', text)
     for match in at_matches:
         if not match.lower().endswith('bot'):
             links.append(f'@{match}')
     
-    # t.me/username
     tm_matches = re.findall(r't\.me/([a-zA-Z0-9_]{5,32})', text)
     for match in tm_matches:
         links.append(f'https://t.me/{match}')
     
-    # joinchat ссылки
     jc_matches = re.findall(r't\.me/joinchat/([a-zA-Z0-9_-]+)', text)
     for match in jc_matches:
         links.append(f'https://t.me/joinchat/{match}')
@@ -387,15 +378,11 @@ def _grab_links(msg) -> list:
     return list(dict.fromkeys(links))
 
 async def auto_subscribe_pyro(client: Client, chat_id: int, bot, uid: int) -> bool:
-    """
-    Автоподписка через Pyrogram - точная копия работающего кода
-    """
     try:
         await bot.send_message(uid, "🔍 Ищу сообщения с требованием подписки...")
         
         targets = []
         
-        # 1. Читаем последние 30 сообщений
         async for msg in client.get_chat_history(chat_id, limit=30):
             if not msg.text:
                 continue
@@ -411,13 +398,11 @@ async def auto_subscribe_pyro(client: Client, chat_id: int, bot, uid: int) -> bo
         
         await bot.send_message(uid, f"🔗 Найдено {len(targets)} ссылок")
         
-        # 2. Подписываемся на все найденные ссылки
         subscribed = 0
         for raw in targets[:10]:
             raw = raw.strip()
             await bot.send_message(uid, f"🔄 Обрабатываю: {raw[:50]}...")
             
-            # Очищаем ссылку
             if raw.startswith("https://t.me/") or raw.startswith("http://t.me/"):
                 path = raw.split("t.me/")[-1].strip("/")
                 if path.startswith("+") or path.startswith("joinchat/"):
@@ -448,7 +433,6 @@ async def auto_subscribe_pyro(client: Client, chat_id: int, bot, uid: int) -> bo
             except Exception as e:
                 await bot.send_message(uid, f"❌ Ошибка: {str(e)[:50]}")
         
-        # 3. Проверяем кнопки подтверждения
         await bot.send_message(uid, "🔘 Проверяю кнопки подтверждения...")
         verified = await click_verify(client, chat_id)
         if verified:
@@ -468,9 +452,6 @@ async def auto_subscribe_pyro(client: Client, chat_id: int, bot, uid: int) -> bo
 # ==================== ОТПРАВКА С АВТОПОДПИСКОЙ ====================
 
 async def send_with_auto_join(uid, bid, client: Client, chat_id, text, bot):
-    """
-    Отправляет сообщение через Pyrogram, при ошибке запускает автоподписку
-    """
     try:
         await client.send_message(chat_id, text)
         return True, "OK"
@@ -695,7 +676,6 @@ async def button_handler(update: Update, context):
         if client:
             await start_broadcast(uid, context.bot, bid, client)
             return
-        # Если нет сессии - запрашиваем номер
         user_states[uid] = {'step': 'auth_phone', 'bid': bid}
         await send_msg(uid, context.bot, "🔐 Введите номер телефона:\n+79123456789", CANCEL_BTN)
 
