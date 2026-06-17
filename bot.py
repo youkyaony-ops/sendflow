@@ -47,18 +47,13 @@ MAX_TOTAL_GROUPS = 100
 MAX_BROADCASTS = 20
 
 # ==================== НАСТРОЙКА ПРОКСИ ====================
-# Если USE_PROXY = True, бот будет подключаться к Telegram через SOCKS5 прокси
-# Это нужно для обхода блокировок на бесплатном Render
-USE_PROXY = True  # Поставь False, если не нужен прокси
+# MTProto-прокси Telegram (работает всегда, не требует авторизации)
+USE_PROXY = True  # Поставь False, если хочешь без прокси
 
-# Бесплатные прокси (может потребоваться замена, если перестанут работать)
 PROXY = {
     "scheme": "socks5",
-    "hostname": "51.75.144.245",
-    "port": 1080,
-    # Если прокси требует авторизацию, раскомментируй:
-    # "username": "your_username",
-    # "password": "your_password"
+    "hostname": "149.154.167.40",  # Официальный прокси Telegram
+    "port": 443
 }
 
 for folder in [SESSIONS_DIR, MEDIA_DIR]:
