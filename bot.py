@@ -5,6 +5,8 @@ import os
 import time
 import random
 import shutil
+import sqlite3
+import threading
 from datetime import datetime
 from telethon import TelegramClient, errors
 from telethon.errors import (
@@ -44,50 +46,92 @@ active_tasks = {}
 sessions = {}
 user_states = {}
 
-# ==================== ХРАНЕНИЕ СЕССИЙ ====================
+# ==================== SQLite С БЛОКИРОВКОЙ ====================
+db_lock = threading.Lock()
+
+def get_db_connection():
+    conn = sqlite3.connect(os.path.join(SESSIONS_DIR, 'sessions.db'), timeout=30)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+    return conn
+
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            user_id INTEGER PRIMARY KEY,
+            phone TEXT,
+            created_at TIMESTAMP,
+            last_ping TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    print("✅ SQLite инициализирован с WAL режимом")
+
+init_db()
+
 def save_session_db(user_id, phone):
-    try:
-        data = {'phone': phone, 'is_authorized': True, 'created_at': str(datetime.now()), 'last_used': str(datetime.now())}
-        with open(os.path.join(SESSIONS_DIR, f'session_{user_id}.json'), 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
-    except:
-        return False
+    with db_lock:
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO sessions (user_id, phone, created_at, last_ping)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, phone, datetime.now(), datetime.now()))
+            conn.commit()
+        except Exception as e:
+            print(f"Save session error: {e}")
+        finally:
+            if conn:
+                conn.close()
 
 def update_ping_db(user_id):
-    try:
-        file_path = os.path.join(SESSIONS_DIR, f'session_{user_id}.json')
-        if os.path.exists(file_path):
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            data['last_used'] = str(datetime.now())
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-    except:
-        pass
+    with db_lock:
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute('UPDATE sessions SET last_ping = ? WHERE user_id = ?', (datetime.now(), user_id))
+            conn.commit()
+        except Exception as e:
+            print(f"Update ping error: {e}")
+        finally:
+            if conn:
+                conn.close()
 
 def delete_session_db(user_id):
-    try:
-        file_path = os.path.join(SESSIONS_DIR, f'session_{user_id}.json')
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        session_file = os.path.join(SESSIONS_DIR, f'session_{user_id}.session')
-        if os.path.exists(session_file):
-            os.remove(session_file)
-    except:
-        pass
+    with db_lock:
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM sessions WHERE user_id = ?', (user_id,))
+            conn.commit()
+        except Exception as e:
+            print(f"Delete session error: {e}")
+        finally:
+            if conn:
+                conn.close()
 
 def has_session_db(user_id):
-    file_path = os.path.join(SESSIONS_DIR, f'session_{user_id}.json')
-    session_file = os.path.join(SESSIONS_DIR, f'session_{user_id}.session')
-    if os.path.exists(file_path) and os.path.exists(session_file):
+    with db_lock:
+        conn = None
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return data.get('is_authorized', False)
-        except:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT user_id FROM sessions WHERE user_id = ?', (user_id,))
+            result = cursor.fetchone() is not None
+            return result
+        except Exception as e:
+            print(f"Has session error: {e}")
             return False
-    return False
+        finally:
+            if conn:
+                conn.close()
 
 # ==================== ДАННЫЕ ====================
 def save_data():
@@ -209,20 +253,21 @@ async def test_subscribe_step(update: Update, context):
     
     del user_states[uid]
 
-# ==================== АВТОПОДПИСКА (ПРОСТАЯ И НАДЁЖНАЯ) ====================
+# ==================== АВТОПОДПИСКА (МАКСИМАЛЬНО ПРОСТАЯ) ====================
 
-async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
+async def auto_subscribe_simple(client, group_entity, bot, uid) -> bool:
     """
-    Простая автоподписка - ищет @username в последних сообщениях
+    Самая простая автоподписка - читает последние сообщения и подписывается на @username
     """
     try:
-        await bot.send_message(uid, "🔍 Ищу ссылки в последних сообщениях...")
+        await bot.send_message(uid, "🔍 Ищу @username в последних сообщениях...")
         
-        # Получаем последние 20 сообщений
+        # Читаем последние 30 сообщений
         messages = []
-        async for msg in client.iter_messages(group_entity, limit=20):
+        async for msg in client.iter_messages(group_entity, limit=30):
             if msg.text:
                 messages.append(msg.text)
+                await bot.send_message(uid, f"📝 Сообщение: {msg.text[:100]}...")
         
         if not messages:
             await bot.send_message(uid, "⚠️ Нет сообщений для анализа")
@@ -231,16 +276,17 @@ async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
         # Собираем все @username
         all_channels = []
         for msg in messages:
-            channels = re.findall(r'@([a-zA-Z0-9_]{5,32})', msg)
-            for channel in channels:
+            found = re.findall(r'@([a-zA-Z0-9_]{5,32})', msg)
+            for channel in found:
                 if channel not in all_channels:
                     all_channels.append(channel)
+                    await bot.send_message(uid, f"🔗 Найден канал: @{channel}")
         
         if not all_channels:
             await bot.send_message(uid, "⚠️ Не найдено @username в сообщениях")
             return False
         
-        await bot.send_message(uid, f"🔗 Найдено {len(all_channels)} каналов: {', '.join(all_channels[:5])}")
+        await bot.send_message(uid, f"📊 Найдено {len(all_channels)} каналов для подписки")
         
         # Подписываемся на каждый
         subscribed = 0
@@ -276,7 +322,7 @@ async def auto_subscribe_to_all(client, group_entity, bot, uid) -> bool:
 
 async def send_with_auto_join(uid, bid, client, group, text, bot):
     """
-    Отправляет сообщение, при ошибке запускает автоподписку
+    Отправляет сообщение, при ошибке запускает простую автоподписку
     """
     try:
         await client.send_message(group, text)
@@ -288,7 +334,7 @@ async def send_with_auto_join(uid, bid, client, group, text, bot):
         await bot.send_message(uid, f"⚠️ Требуется подписка для {group}")
         try:
             group_entity = await client.get_entity(group)
-            success = await auto_subscribe_to_all(client, group_entity, bot, uid)
+            success = await auto_subscribe_simple(client, group_entity, bot, uid)
             if success:
                 await bot.send_message(uid, f"🔄 Повторная попытка через 3 секунды...")
                 await asyncio.sleep(3)
@@ -613,7 +659,7 @@ async def start_broadcast(uid, bot, bid, client):
 
     bc['groups'] = valid
     save_data()
-    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Автоподписка включена!")
+    await send_msg(uid, bot, f"🚀 ЗАПУСК 24/7\nГрупп: {len(valid)}\nИнтервал: {interval} сек\n\n✅ Автоподписка включена! Бот подпишется автоматически через ваш аккаунт")
 
     tk = f"{uid}_{bid}"
     task = asyncio.create_task(run_broadcast(uid, bid, client, valid, text, interval, media_path, has_photo, bot))
@@ -862,7 +908,8 @@ async def run():
     print("✅ SENDFLOW БОТ ЗАПУЩЕН")
     print("🤖 АВТОПОДПИСКА АКТИВНА")
     print("📌 ПОДПИСЫВАЕТСЯ ЧЕРЕЗ ВАШ АККАУНТ")
-    print("📌 ИЩЕТ @username В СООБЩЕНИЯХ")
+    print("📌 ИЩЕТ @username В ПОСЛЕДНИХ СООБЩЕНИЯХ")
+    print("📌 SQLite С WAL РЕЖИМОМ")
     print("=" * 60)
 
     await start_server()
