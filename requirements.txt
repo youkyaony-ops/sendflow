@@ -1,4 +1,4 @@
-telethon==1.36.0
-python-telegram-bot
-aiohttp
-flask
+python-telegram-bot==20.7
+aiohttp==3.9.0
+pyrogram==2.0.106
+pytgcalls==5.0.1
