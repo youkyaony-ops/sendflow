@@ -16,7 +16,6 @@ from pyrogram.errors import (
     UserAlreadyParticipant,
     ChannelPrivate,
     ChatWriteForbidden,
-    UserBanned,
     RPCError,
     PhoneNumberInvalid,
     PhoneCodeInvalid,
