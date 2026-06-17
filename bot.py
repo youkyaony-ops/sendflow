@@ -35,11 +35,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== НАСТРОЙКА ====================
-# ВАЖНО: В production вынеси в переменные окружения!
 BOT_TOKEN = '8135472813:AAHiugVNCzgRuIAxG4L_3MppCW0Is01VHH8'
 API_ID = 31245848
 API_HASH = '67336528977585e1457985dc1d0ceefb'
-ADMIN_ID = 7192049112  # ЗАМЕНИ НА СВОЙ Telegram ID!
+ADMIN_ID = 7192049112  # Твой ID из алерта
 DATA_FILE = 'user_data.json'
 SESSIONS_DIR = 'telegram_sessions'
 MEDIA_DIR = 'media_files'
@@ -55,7 +54,7 @@ RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://sendflow-12.onrender
 
 user_data = {}
 active_tasks = {}
-keep_alive_tasks = {}  # ✅ ФИКС: отдельный словарь для keep-alive
+keep_alive_tasks = {}
 pyro_clients = {}
 user_states = {}
 
@@ -255,20 +254,24 @@ async def get_pyro_client(uid):
             return None
     return None
 
-async def request_pyro_code(uid, phone):
+async def request_pyro_code(uid, phone, bot=None):
+    """Запрос кода авторизации с детальной ошибкой"""
     client = Client(f"user_{uid}", API_ID, API_HASH, workdir=SESSIONS_DIR)
     try:
         await client.start()
         await client.send_code(phone)
         pyro_clients[uid] = client
-        return True
+        return True, None
     except Exception as e:
-        logger.error(f"Code request error for {uid}: {e}")
+        error_msg = str(e)[:200]
+        logger.error(f"Code request error for {uid}: {error_msg}")
+        if bot:
+            await alert_admin(bot, f"❌ Ошибка отправки кода для {uid}\nТелефон: {phone}\nОшибка: {error_msg}")
         try:
             await client.stop()
         except:
             pass
-        return False
+        return False, error_msg
 
 async def sign_in_pyro(uid, code):
     client = pyro_clients.get(uid)
@@ -301,7 +304,7 @@ async def sign_in_2fa(uid, password):
         return None
 
 async def keep_alive_loop(uid):
-    """Поддержание сессии живой (вызывается один раз на пользователя)"""
+    """Поддержание сессии живой"""
     while True:
         await asyncio.sleep(300)
         if uid in pyro_clients:
@@ -508,11 +511,11 @@ async def send_with_auto_join(uid, bid, client: Client, chat_id, text, bot):
         await client.send_message(chat_id, text)
         return True, "OK"
     except FloodWait as e:
-        wait_time = min(int(e.value), 600)  # Максимум 10 минут ожидания
+        wait_time = min(int(e.value), 600)
         await bot.send_message(uid, f"⏳ FloodWait: жду {wait_time} сек...")
         await asyncio.sleep(wait_time)
         return await send_with_auto_join(uid, bid, client, chat_id, text, bot)
-    except (ChatWriteForbidden, ChannelPrivate, UserBanned) as e:
+    except (ChatWriteForbidden, ChannelPrivate) as e:
         await bot.send_message(uid, f"⚠️ Требуется подписка для {chat_id}")
         try:
             success = await auto_subscribe_pyro(client, chat_id, bot, uid)
@@ -596,7 +599,6 @@ async def show_broadcast(uid, bot, bid):
 
 async def cleanup_user_tasks(uid, bot=None):
     """Останавливает все задачи пользователя и прибирает keep-alive"""
-    # Отменяем все активные рассылки
     for tk in list(active_tasks.keys()):
         if tk.startswith(f"{uid}_"):
             try:
@@ -609,7 +611,6 @@ async def cleanup_user_tasks(uid, bot=None):
                 if bot:
                     await alert_admin(bot, f"ℹ️ Рассылка {tk} пользователя {uid} принудительно остановлена")
     
-    # Проверяем, есть ли ещё активные рассылки
     has_active = any(k.startswith(f"{uid}_") for k in active_tasks)
     if not has_active and uid in keep_alive_tasks:
         try:
@@ -775,7 +776,6 @@ async def button_handler(update: Update, context):
             await send_msg(uid, context.bot, f"🛑 Рассылка #{bid+1} остановлена")
             await alert_admin(context.bot, f"🛑 Рассылка #{bid+1} пользователя {uid} остановлена")
         
-        # Проверяем, нужно ли остановить keep-alive
         has_active = any(k.startswith(f"{uid}_") for k in active_tasks)
         if not has_active and uid in keep_alive_tasks:
             try:
@@ -820,7 +820,6 @@ async def button_handler(update: Update, context):
             if tk in active_tasks:
                 del active_tasks[tk]
         
-        # Проверка keep-alive
         has_active = any(k.startswith(f"{uid}_") for k in active_tasks)
         if not has_active and uid in keep_alive_tasks:
             try:
@@ -918,7 +917,6 @@ async def start_broadcast(uid, bot, bid, client: Client):
     task = asyncio.create_task(run_broadcast(uid, bid, client, valid, text, interval, media_path, has_photo, bot))
     active_tasks[tk] = task
     
-    # ✅ ФИКС: Запускаем keep-alive только если его ещё нет
     if uid not in keep_alive_tasks or keep_alive_tasks[uid].done():
         keep_alive_tasks[uid] = asyncio.create_task(keep_alive_loop(uid))
     
@@ -1077,14 +1075,13 @@ async def message_handler(update: Update, context):
             await send_msg(uid, context.bot, "❌ Формат: +79123456789", CANCEL_BTN)
             return
         bid = step_data['bid']
-        success = await request_pyro_code(uid, phone)
+        success, err = await request_pyro_code(uid, phone, context.bot)
         if success:
             user_states[uid] = {'step': 'auth_code', 'bid': bid}
             await send_msg(uid, context.bot, "📲 Код отправлен. Введите code12345", CANCEL_BTN)
         else:
-            await send_msg(uid, context.bot, "❌ Ошибка отправки кода", MAIN_MENU)
+            await send_msg(uid, context.bot, f"❌ Ошибка: {err or 'неизвестная ошибка'}", MAIN_MENU)
             del user_states[uid]
-            await alert_admin(context.bot, f"❌ Пользователь {uid} не смог получить код")
 
     elif step == 'auth_code':
         if not update.message.text:
@@ -1152,7 +1149,6 @@ async def start_server():
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
     
-    # ✅ Внутренний keep-alive для Render
     async def internal_keep_alive():
         import aiohttp
         while True:
@@ -1185,16 +1181,16 @@ async def run():
     await bot_app.bot.set_webhook(f"{RENDER_URL}/webhook/{BOT_TOKEN}")
 
     print("=" * 60)
-    print("✅ SENDFLOW БОТ ЗАПУЩЕН (v2.0)")
+    print("✅ SENDFLOW БОТ ЗАПУЩЕН (v2.1)")
     print("🤖 АВТОПОДПИСКА УЛУЧШЕНА")
     print("📊 СТАТИСТИКА И АЛЕРТЫ ДОБАВЛЕНЫ")
     print("🔒 ЛИМИТЫ ГРУПП И УТЕЧКИ ИСПРАВЛЕНЫ")
+    print("🔍 ДЕТАЛЬНЫЕ ОШИБКИ АВТОРИЗАЦИИ")
     print(f"👤 АДМИН: {ADMIN_ID}")
     print("=" * 60)
     
-    # Отправка сообщения админу о старте
     try:
-        await bot_app.bot.send_message(ADMIN_ID, "✅ SendFlow бот запущен (v2.0)")
+        await bot_app.bot.send_message(ADMIN_ID, "✅ SendFlow бот запущен (v2.1)")
     except:
         pass
 
