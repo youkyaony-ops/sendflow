@@ -51,8 +51,8 @@ USE_PROXY = True
 
 PROXY = {
     "scheme": "socks5",
-    "hostname": "31.59.20.176",
-    "port": 6754,
+    "hostname": "92.113.242.158",
+    "port": 6742,
     "username": "usjxmzph",
     "password": "55i8cschr8as"
 }
