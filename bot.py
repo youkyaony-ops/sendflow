@@ -46,14 +46,15 @@ MAX_GROUPS_PER_BROADCAST = 50
 MAX_TOTAL_GROUPS = 100
 MAX_BROADCASTS = 20
 
-# ==================== НАСТРОЙКА ПРОКСИ ====================
-# MTProto-прокси Telegram (работает всегда, не требует авторизации)
-USE_PROXY = True  # Поставь False, если хочешь без прокси
+# ==================== НАСТРОЙКА ПРОКСИ (Webshare - бесплатный) ====================
+USE_PROXY = True
 
 PROXY = {
     "scheme": "socks5",
-    "hostname": "149.154.167.40",  # Официальный прокси Telegram
-    "port": 443
+    "hostname": "31.59.20.176",
+    "port": 6754,
+    "username": "usjxmzph",
+    "password": "55i8cschr8as"
 }
 
 for folder in [SESSIONS_DIR, MEDIA_DIR]:
@@ -255,7 +256,7 @@ async def get_pyro_client(uid):
             await client.start()
             pyro_clients[uid] = client
             update_ping_db(uid)
-            logger.info(f"✅ Клиент {uid} подключен {'через прокси' if USE_PROXY else 'напрямую'}")
+            logger.info(f"✅ Клиент {uid} подключен через прокси {PROXY['hostname']}:{PROXY['port']}")
             return client
         except Exception as e:
             logger.error(f"Pyro client start error for {uid}: {e}")
@@ -279,13 +280,13 @@ async def request_pyro_code(uid, phone, bot=None):
         await client.start()
         await client.send_code(phone)
         pyro_clients[uid] = client
-        logger.info(f"✅ Код отправлен для {uid} {'через прокси' if USE_PROXY else 'напрямую'}")
+        logger.info(f"✅ Код отправлен для {uid} через прокси")
         return True, None
     except Exception as e:
         error_msg = str(e)[:200]
         logger.error(f"Code request error for {uid}: {error_msg}")
         if bot:
-            await alert_admin(bot, f"❌ Ошибка отправки кода для {uid}\nТелефон: {phone}\nПрокси: {'включен' if USE_PROXY else 'выключен'}\nОшибка: {error_msg}")
+            await alert_admin(bot, f"❌ Ошибка отправки кода для {uid}\nТелефон: {phone}\nПрокси: {PROXY['hostname']}:{PROXY['port']}\nОшибка: {error_msg}")
         try:
             await client.stop()
         except:
@@ -939,7 +940,7 @@ async def start_broadcast(uid, bot, bid, client: Client):
     if uid not in keep_alive_tasks or keep_alive_tasks[uid].done():
         keep_alive_tasks[uid] = asyncio.create_task(keep_alive_loop(uid))
     
-    await alert_admin(bot, f"🚀 Пользователь {uid} запустил рассылку #{bid+1}\nГрупп: {len(valid)}\nИнтервал: {interval}с\nПрокси: {'✅' if USE_PROXY else '❌'}")
+    await alert_admin(bot, f"🚀 Пользователь {uid} запустил рассылку #{bid+1}\nГрупп: {len(valid)}\nИнтервал: {interval}с\nПрокси: {'✅' if USE_PROXY else '❌'} {PROXY['hostname'] if USE_PROXY else ''}")
 
 async def run_broadcast(uid, bid, client: Client, groups, text, interval, media_path, has_photo, bot):
     sent = user_data[uid]['broadcasts'][bid].get('sent', 0)
@@ -1201,17 +1202,16 @@ async def run():
 
     proxy_status = "✅ ВКЛЮЧЕН" if USE_PROXY else "❌ ВЫКЛЮЧЕН"
     print("=" * 60)
-    print("✅ SENDFLOW БОТ ЗАПУЩЕН (v2.2)")
-    print(f"🌐 ПРОКСИ: {proxy_status}")
+    print("✅ SENDFLOW БОТ ЗАПУЩЕН (v2.3 - Webshare)")
+    print(f"🌐 ПРОКСИ: {proxy_status} - {PROXY['hostname']}:{PROXY['port']}")
     print("🤖 АВТОПОДПИСКА УЛУЧШЕНА")
     print("📊 СТАТИСТИКА И АЛЕРТЫ ДОБАВЛЕНЫ")
     print("🔒 ЛИМИТЫ ГРУПП И УТЕЧКИ ИСПРАВЛЕНЫ")
-    print("🔍 ДЕТАЛЬНЫЕ ОШИБКИ АВТОРИЗАЦИИ")
     print(f"👤 АДМИН: {ADMIN_ID}")
     print("=" * 60)
     
     try:
-        await bot_app.bot.send_message(ADMIN_ID, f"✅ SendFlow бот запущен (v2.2)\nПрокси: {proxy_status}")
+        await bot_app.bot.send_message(ADMIN_ID, f"✅ SendFlow бот запущен (v2.3)\nПрокси: {PROXY['hostname']}:{PROXY['port']}")
     except:
         pass
 
